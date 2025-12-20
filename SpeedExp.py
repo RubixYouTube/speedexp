@@ -9,13 +9,6 @@ import json
 # Fixed pitch ratio: 2^(1/12) = 1 semitone up
 FIXED_PITCH_RATIO = 1.059463094352953
 
-# Output FPS
-OUTPUT_FPS = 60
-
-# Expected speed ratio
-EXPECTED_SPEED = 2.0
-SPEED_TOLERANCE = 0.02  # 2% tolerance
-
 # ANSI color codes
 class Colors:
     ORANGE = '\033[38;5;208m'
@@ -49,7 +42,6 @@ def print_welcome():
     print(f"{Colors.CYAN}Output:{Colors.RESET}")
     print(f"  • Exports saved to: Downloads/Exports/")
     print(f"  • Format: export-N.mp4")
-    print(f"  • FPS: {OUTPUT_FPS}")
     print()
     print(f"{Colors.ORANGE}{'='*60}{Colors.RESET}\n")
 
@@ -364,58 +356,9 @@ def verify_output_file(file_path, min_size_kb=70):
     except Exception as e:
         return False, f"Error: {e}"
 
-def correct_speed(input_path, output_path, correction_factor, has_rubberband, has_audio):
-    """Apply speed correction to fix misaligned video"""
-    try:
-        # Video: setpts = 1/correction_factor * PTS
-        pts_factor = 1.0 / correction_factor
-        
-        if has_audio:
-            if has_rubberband:
-                audio_filter = f"rubberband=tempo={correction_factor}"
-            else:
-                # atempo only supports 0.5 to 2.0, chain if needed
-                if correction_factor <= 2.0:
-                    audio_filter = f"atempo={correction_factor}"
-                else:
-                    audio_filter = f"atempo=2.0,atempo={correction_factor/2.0}"
-            
-            cmd = [
-                'ffmpeg', '-i', input_path,
-                '-vf', f'setpts={pts_factor}*PTS',
-                '-af', audio_filter,
-                '-c:v', 'libx264',
-                '-preset', 'fast',
-                '-crf', '23',
-                '-pix_fmt', 'yuv420p',
-                '-r', str(OUTPUT_FPS),
-                '-c:a', 'aac',
-                '-b:a', '128k',
-                '-ar', '44100',
-                '-y', output_path
-            ]
-        else:
-            cmd = [
-                'ffmpeg', '-i', input_path,
-                '-vf', f'setpts={pts_factor}*PTS',
-                '-c:v', 'libx264',
-                '-preset', 'fast',
-                '-crf', '23',
-                '-pix_fmt', 'yuv420p',
-                '-r', str(OUTPUT_FPS),
-                '-an',
-                '-y', output_path
-            ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        return result.returncode == 0
-        
-    except:
-        return False
-
 def process_video_cumulative(input_path, output_path, export_num, iteration, reference_size_mb, 
                              enable_pitch, has_rubberband, has_loudnorm, target_volume_db):
-    """Process video cumulatively with speed correction"""
+    """Process video cumulatively using rubberband for tempo"""
     
     temp_files = []
     
@@ -433,11 +376,10 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         input_size_mb = input_info['size'] / (1024 * 1024)
         has_audio = input_info['has_audio']
         
-        expected_sped_duration = input_duration / EXPECTED_SPEED
+        expected_sped_duration = input_duration / 2.0
         
         print(f"  Input: {input_duration:.2f}s, {input_size_mb:.2f} MB")
         print(f"  Expected after 2x: {expected_sped_duration:.2f}s")
-        print(f"  Output FPS: {OUTPUT_FPS}")
         
         # Volume adjustment
         current_volume = get_audio_volume(input_path) if has_audio else -20.0
@@ -451,28 +393,27 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         # Temp file paths
         temp_dir = os.path.dirname(output_path)
         temp_sped = os.path.join(temp_dir, f"temp_sped_{export_num}_{os.getpid()}.mp4")
-        temp_corrected = os.path.join(temp_dir, f"temp_corrected_{export_num}_{os.getpid()}.mp4")
         temp_list = os.path.join(temp_dir, f"temp_list_{export_num}_{os.getpid()}.txt")
         temp_concat = os.path.join(temp_dir, f"temp_concat_{export_num}_{os.getpid()}.mp4")
         
-        temp_files = [temp_sped, temp_corrected, temp_list, temp_concat]
+        temp_files = [temp_sped, temp_list, temp_concat]
         
         # Step 1: Speed up using rubberband tempo
         if has_audio:
             if has_rubberband:
                 if enable_pitch:
-                    print(f"  Step 1/4: rubberband tempo=2.0 pitch={FIXED_PITCH_RATIO}...")
+                    print(f"  Step 1/3: rubberband tempo=2.0 pitch={FIXED_PITCH_RATIO}...")
                     audio_filter = f"rubberband=tempo=2.0:pitch={FIXED_PITCH_RATIO},volume={volume_adjustment}dB"
                 else:
-                    print(f"  Step 1/4: rubberband tempo=2.0...")
+                    print(f"  Step 1/3: rubberband tempo=2.0...")
                     audio_filter = f"rubberband=tempo=2.0,volume={volume_adjustment}dB"
             else:
                 if enable_pitch:
-                    print(f"  Step 1/4: atempo=2.0 + asetrate (fallback)...")
+                    print(f"  Step 1/3: atempo=2.0 + asetrate (fallback)...")
                     pitched_rate = int(44100 * FIXED_PITCH_RATIO)
                     audio_filter = f"atempo=2.0,asetrate={pitched_rate},aresample=44100,volume={volume_adjustment}dB"
                 else:
-                    print(f"  Step 1/4: atempo=2.0 (fallback)...")
+                    print(f"  Step 1/3: atempo=2.0 (fallback)...")
                     audio_filter = f"atempo=2.0,volume={volume_adjustment}dB"
             
             cmd_speed = [
@@ -483,14 +424,12 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                 '-preset', 'fast',
                 '-crf', '23',
                 '-pix_fmt', 'yuv420p',
-                '-r', str(OUTPUT_FPS),
                 '-c:a', 'aac',
                 '-b:a', '128k',
-                '-ar', '44100',
                 '-y', temp_sped
             ]
         else:
-            print(f"  Step 1/4: setpts=0.5*PTS (no audio)...")
+            print(f"  Step 1/3: setpts=0.5*PTS (no audio)...")
             cmd_speed = [
                 'ffmpeg', '-i', input_path,
                 '-vf', 'setpts=0.5*PTS',
@@ -498,7 +437,6 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                 '-preset', 'fast',
                 '-crf', '23',
                 '-pix_fmt', 'yuv420p',
-                '-r', str(OUTPUT_FPS),
                 '-an',
                 '-y', temp_sped
             ]
@@ -517,45 +455,13 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         speed_ratio = input_duration / actual_sped_duration if actual_sped_duration > 0 else 0
         print(f"    Result: {actual_sped_duration:.2f}s (ratio: {speed_ratio:.2f}x)")
         
-        # Step 2: Speed correction if needed
-        current_file = temp_sped
-        speed_diff = abs(speed_ratio - EXPECTED_SPEED)
+        # Step 2: Duplicate
+        print(f"  Step 2/3: Duplicating...")
         
-        if speed_diff > SPEED_TOLERANCE:
-            # Calculate correction factor
-            correction_factor = EXPECTED_SPEED / speed_ratio
-            print(f"  Step 2/4: Speed correction (factor: {correction_factor:.4f})...")
-            
-            correction_success = correct_speed(
-                temp_sped, 
-                temp_corrected, 
-                correction_factor, 
-                has_rubberband, 
-                has_audio
-            )
-            
-            if correction_success:
-                valid, msg = verify_output_file(temp_corrected)
-                if valid:
-                    corrected_info = get_video_info(temp_corrected)
-                    corrected_duration = corrected_info['duration']
-                    new_ratio = input_duration / corrected_duration if corrected_duration > 0 else 0
-                    print(f"    Corrected: {corrected_duration:.2f}s (ratio: {new_ratio:.2f}x)")
-                    current_file = temp_corrected
-                else:
-                    print(f"    {Colors.YELLOW}⚠ Correction failed, using original{Colors.RESET}")
-            else:
-                print(f"    {Colors.YELLOW}⚠ Correction failed, using original{Colors.RESET}")
-        else:
-            print(f"  Step 2/4: Speed OK (within {SPEED_TOLERANCE*100:.0f}% tolerance)")
-        
-        # Step 3: Duplicate
-        print(f"  Step 3/4: Duplicating...")
-        
-        abs_current = os.path.abspath(current_file)
+        abs_temp_sped = os.path.abspath(temp_sped)
         with open(temp_list, 'w') as f:
-            f.write(f"file '{abs_current}'\n")
-            f.write(f"file '{abs_current}'\n")
+            f.write(f"file '{abs_temp_sped}'\n")
+            f.write(f"file '{abs_temp_sped}'\n")
         
         cmd_concat = [
             'ffmpeg',
@@ -578,8 +484,8 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         concat_duration = concat_info['duration']
         print(f"    Result: {concat_duration:.2f}s")
         
-        # Step 4: Add text overlay
-        print(f"  Step 4/4: Adding text...")
+        # Step 3: Add text overlay
+        print(f"  Step 3/3: Adding text...")
         
         target_size_mb = reference_size_mb * 1.15
         target_bitrate_total = (target_size_mb * 8 * 1024) / concat_duration
@@ -624,7 +530,6 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                     '-b:v', f'{target_video_bitrate}k',
                     '-maxrate', f'{int(target_video_bitrate * 1.5)}k',
                     '-bufsize', f'{int(target_video_bitrate * 2)}k',
-                    '-r', str(OUTPUT_FPS),
                     '-c:a', 'aac',
                     '-b:a', '128k',
                     '-movflags', '+faststart',
@@ -639,7 +544,6 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                     '-b:v', f'{target_video_bitrate}k',
                     '-maxrate', f'{int(target_video_bitrate * 1.5)}k',
                     '-bufsize', f'{int(target_video_bitrate * 2)}k',
-                    '-r', str(OUTPUT_FPS),
                     '-an',
                     '-movflags', '+faststart',
                     '-y', output_path
@@ -670,7 +574,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         cumulative_speed = 2 ** (iteration + 1)
         
         print(f"{Colors.GREEN}✓{Colors.RESET} Export {export_num} completed")
-        print(f"    Duration: {final_duration:.2f}s | Speed: {cumulative_speed}x | FPS: {OUTPUT_FPS}")
+        print(f"    Duration: {final_duration:.2f}s | Speed: {cumulative_speed}x")
         
         return True
         
@@ -764,7 +668,6 @@ def compile_exports(export_files, exports_dir):
                 '-vf', watermark_filter,
                 '-c:v', codec
             ] + codec_params + [
-                '-r', str(OUTPUT_FPS),
                 '-c:a', 'aac',
                 '-b:a', '128k',
                 '-movflags', '+faststart',
@@ -801,7 +704,6 @@ def compile_exports(export_files, exports_dir):
         print(f"  File: {output_name}.mp4")
         print(f"  Size: {final_size:.2f} MB")
         print(f"  Duration: {final_info['duration']:.2f}s")
-        print(f"  FPS: {OUTPUT_FPS}")
         
         return output_path
         
@@ -845,15 +747,13 @@ def main():
         print(f"  Video: {video_path}")
         print(f"  Size: {initial_size:.2f} MB")
         print(f"  Duration: {initial_duration:.2f}s")
-        print(f"  Input FPS: {initial_info.get('fps', 30):.2f}")
-        print(f"  Output FPS: {OUTPUT_FPS}")
+        print(f"  FPS: {initial_info.get('fps', 30):.2f}")
         print(f"  Resolution: {initial_info.get('width', 0)}x{initial_info.get('height', 0)}")
         print(f"  Has Audio: {initial_info.get('has_audio', False)}")
         print(f"  Exports: {num_exports}")
         print(f"  Starting Number: {start_num}")
         print(f"  Pitch: {'YES' if enable_pitch else 'NO'}")
         print(f"  Audio Method: {'rubberband' if has_rubberband else 'atempo (fallback)'}")
-        print(f"  Speed Correction: Enabled (tolerance: {SPEED_TOLERANCE*100:.0f}%)")
         if has_rubberband:
             if enable_pitch:
                 print(f"    Filter: rubberband=tempo=2.0:pitch={FIXED_PITCH_RATIO}")
