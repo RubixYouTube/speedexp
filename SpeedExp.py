@@ -52,10 +52,10 @@ def print_welcome():
 def check_dependencies():
     """Check if required dependencies are installed"""
     if not shutil.which('ffmpeg'):
-        raise SystemError("ffmpeg is not installed or not in PATH. Please install ffmpeg first.")
+        raise SystemError("ffmpeg is not installed or not in PATH.")
     
     if not shutil.which('ffprobe'):
-        raise SystemError("ffprobe is not installed or not in PATH. Please install ffprobe first.")
+        raise SystemError("ffprobe is not installed or not in PATH.")
     
     print(f"{Colors.GREEN}✓{Colors.RESET} FFmpeg found")
     print(f"{Colors.GREEN}✓{Colors.RESET} FFprobe found")
@@ -80,8 +80,7 @@ def get_ffmpeg_version():
     """Get ffmpeg version"""
     try:
         result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
-        version_line = result.stdout.split('\n')[0]
-        return version_line
+        return result.stdout.split('\n')[0]
     except:
         return "Unknown"
 
@@ -95,14 +94,12 @@ def get_available_codecs():
             'libx264': 'libx264' in codecs_output or 'H.264' in codecs_output,
             'h264': 'h264' in codecs_output.lower(),
             'mpeg4': 'mpeg4' in codecs_output,
-            'libx265': 'libx265' in codecs_output,
         }
         
         print(f"  Available codecs: {[k for k, v in available.items() if v]}")
         return available
         
-    except Exception as e:
-        print(f"  Warning: Could not detect codecs: {e}")
+    except:
         return {'libx264': True, 'mpeg4': True}
 
 def select_codec_configs():
@@ -117,8 +114,6 @@ def select_codec_configs():
             'codec': 'libx264',
             'params': ['-profile:v', 'baseline', '-level', '3.0', '-pix_fmt', 'yuv420p', '-preset', 'fast']
         })
-    
-    if available.get('libx264'):
         configs.append({
             'name': 'H.264 Main',
             'codec': 'libx264',
@@ -206,7 +201,7 @@ def get_video_info(file_path):
             else:
                 fps = float(fps_str)
         
-        info = {
+        return {
             'duration': float(probe.get('format', {}).get('duration', 0)),
             'size': int(probe.get('format', {}).get('size', 0)),
             'bitrate': int(probe.get('format', {}).get('bit_rate', 0) or 0),
@@ -217,7 +212,6 @@ def get_video_info(file_path):
             'has_audio': audio_stream is not None,
             'fps': fps
         }
-        return info
         
     except Exception as e:
         print(f"  Warning: Could not get video info: {e}")
@@ -235,13 +229,11 @@ def get_audio_volume(file_path):
             if 'mean_volume' in line:
                 parts = line.split('mean_volume:')
                 if len(parts) > 1:
-                    volume_str = parts[1].strip().split(' ')[0]
-                    return float(volume_str)
+                    return float(parts[1].strip().split(' ')[0])
         
         return -20.0
         
-    except Exception as e:
-        print(f"  Warning: Could not detect volume: {e}")
+    except:
         return -20.0
 
 def format_power_notation(number):
@@ -341,7 +333,7 @@ def escape_text_for_ffmpeg(text):
     return text
 
 def verify_output_file(file_path, min_size_kb=70):
-    """Verify output file is valid (70KB minimum)"""
+    """Verify output file is valid"""
     if not os.path.exists(file_path):
         return False, "File not created"
     
@@ -370,7 +362,7 @@ def verify_output_file(file_path, min_size_kb=70):
 
 def process_video_cumulative(input_path, output_path, export_num, iteration, reference_size_mb, 
                              enable_pitch, has_rubberband, has_loudnorm, target_volume_db):
-    """Process video cumulatively"""
+    """Process video cumulatively - SIMPLE VERSION"""
     
     temp_files = []
     
@@ -388,12 +380,10 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         input_size_mb = input_info['size'] / (1024 * 1024)
         has_audio = input_info['has_audio']
         
-        expected_sped_duration = input_duration / 2
-        expected_final_duration = expected_sped_duration * 2
+        expected_sped_duration = input_duration / 2.0
         
         print(f"  Input: {input_duration:.2f}s, {input_size_mb:.2f} MB")
-        print(f"  Expected: sped={expected_sped_duration:.2f}s, final={expected_final_duration:.2f}s")
-        print(f"  Output FPS: {OUTPUT_FPS}")
+        print(f"  Expected after 2x: {expected_sped_duration:.2f}s")
         
         # Volume adjustment
         current_volume = get_audio_volume(input_path) if has_audio else -20.0
@@ -401,8 +391,8 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         
         if enable_pitch:
             cumulative_semitones = (iteration + 1) * 1
-            print(f"  Pitch: rubberband pitch={FIXED_PITCH_RATIO} (cumulative: +{cumulative_semitones}st)")
-        print(f"  Volume: {current_volume:.1f}dB -> {target_volume_db:.1f}dB (adjust: {volume_adjustment:+.1f}dB)")
+            print(f"  Pitch: +{cumulative_semitones} semitones (cumulative)")
+        print(f"  Volume: {current_volume:.1f}dB -> {target_volume_db:.1f}dB")
         
         # Temp file paths
         temp_dir = os.path.dirname(output_path)
@@ -412,119 +402,47 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         
         temp_files = [temp_sped, temp_list, temp_concat]
         
-        # Step 1: Speed up video 2x with audio processing
-        if enable_pitch and has_rubberband and has_audio:
-            print(f"  Step 1/3: Speed 2x + pitch (atempo + rubberband)...")
-            
-            audio_filter = (
-                f"atempo=2.0,"
-                f"rubberband=pitch={FIXED_PITCH_RATIO}:pitchq=speed,"
-                f"aresample=44100:async=1000,"
-                f"volume={volume_adjustment}dB"
-            )
+        # Step 1: Speed up - SIMPLE, GUARANTEED 2X
+        # Video: setpts=0.5*PTS (exactly 2x)
+        # Audio: atempo=2.0 (exactly 2x)
+        # Pitch: separate rubberband pitch-only filter
+        
+        if has_audio:
+            if enable_pitch and has_rubberband:
+                print(f"  Step 1/3: Speed 2x + Pitch...")
+                # atempo for speed, rubberband for pitch ONLY
+                audio_filter = f"atempo=2.0,rubberband=pitch={FIXED_PITCH_RATIO},volume={volume_adjustment}dB"
+            elif enable_pitch and not has_rubberband:
+                print(f"  Step 1/3: Speed 2x + Pitch (asetrate fallback)...")
+                pitched_rate = int(44100 * FIXED_PITCH_RATIO)
+                audio_filter = f"atempo=2.0,asetrate={pitched_rate},aresample=44100,volume={volume_adjustment}dB"
+            else:
+                print(f"  Step 1/3: Speed 2x (no pitch)...")
+                audio_filter = f"atempo=2.0,volume={volume_adjustment}dB"
             
             cmd_speed = [
                 'ffmpeg', '-i', input_path,
-                '-filter_complex',
-                f'[0:v]setpts=0.5*PTS,fps={OUTPUT_FPS}[v];[0:a]{audio_filter}[a]',
-                '-map', '[v]',
-                '-map', '[a]',
+                '-vf', f'setpts=0.5*PTS',
+                '-af', audio_filter,
                 '-c:v', 'libx264',
                 '-preset', 'fast',
                 '-crf', '23',
                 '-pix_fmt', 'yuv420p',
+                '-r', str(OUTPUT_FPS),
                 '-c:a', 'aac',
                 '-b:a', '128k',
-                '-ar', '44100',
-                '-shortest',
-                '-y', temp_sped
-            ]
-        elif has_rubberband and has_audio:
-            print(f"  Step 1/3: Speed 2x (atempo, no pitch)...")
-            
-            audio_filter = (
-                f"atempo=2.0,"
-                f"aresample=44100:async=1000,"
-                f"volume={volume_adjustment}dB"
-            )
-            
-            cmd_speed = [
-                'ffmpeg', '-i', input_path,
-                '-filter_complex',
-                f'[0:v]setpts=0.5*PTS,fps={OUTPUT_FPS}[v];[0:a]{audio_filter}[a]',
-                '-map', '[v]',
-                '-map', '[a]',
-                '-c:v', 'libx264',
-                '-preset', 'fast',
-                '-crf', '23',
-                '-pix_fmt', 'yuv420p',
-                '-c:a', 'aac',
-                '-b:a', '128k',
-                '-ar', '44100',
-                '-shortest',
-                '-y', temp_sped
-            ]
-        elif enable_pitch and not has_rubberband and has_audio:
-            print(f"  Step 1/3: Speed 2x + asetrate pitch (fallback)...")
-            
-            pitched_rate = int(44100 * FIXED_PITCH_RATIO)
-            audio_filter = (
-                f"atempo=2.0,"
-                f"asetrate={pitched_rate},aresample=44100:async=1000,"
-                f"volume={volume_adjustment}dB"
-            )
-            
-            cmd_speed = [
-                'ffmpeg', '-i', input_path,
-                '-filter_complex',
-                f'[0:v]setpts=0.5*PTS,fps={OUTPUT_FPS}[v];[0:a]{audio_filter}[a]',
-                '-map', '[v]',
-                '-map', '[a]',
-                '-c:v', 'libx264',
-                '-preset', 'fast',
-                '-crf', '23',
-                '-pix_fmt', 'yuv420p',
-                '-c:a', 'aac',
-                '-b:a', '128k',
-                '-ar', '44100',
-                '-shortest',
-                '-y', temp_sped
-            ]
-        elif has_audio:
-            print(f"  Step 1/3: Speed 2x (atempo, no rubberband)...")
-            
-            audio_filter = (
-                f"atempo=2.0,"
-                f"aresample=44100:async=1000,"
-                f"volume={volume_adjustment}dB"
-            )
-            
-            cmd_speed = [
-                'ffmpeg', '-i', input_path,
-                '-filter_complex',
-                f'[0:v]setpts=0.5*PTS,fps={OUTPUT_FPS}[v];[0:a]{audio_filter}[a]',
-                '-map', '[v]',
-                '-map', '[a]',
-                '-c:v', 'libx264',
-                '-preset', 'fast',
-                '-crf', '23',
-                '-pix_fmt', 'yuv420p',
-                '-c:a', 'aac',
-                '-b:a', '128k',
-                '-ar', '44100',
-                '-shortest',
                 '-y', temp_sped
             ]
         else:
             print(f"  Step 1/3: Speed 2x (no audio)...")
-            
             cmd_speed = [
                 'ffmpeg', '-i', input_path,
-                '-vf', f'setpts=0.5*PTS,fps={OUTPUT_FPS}',
+                '-vf', f'setpts=0.5*PTS',
                 '-c:v', 'libx264',
                 '-preset', 'fast',
                 '-crf', '23',
                 '-pix_fmt', 'yuv420p',
+                '-r', str(OUTPUT_FPS),
                 '-an',
                 '-y', temp_sped
             ]
@@ -541,13 +459,13 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         actual_sped_duration = sped_info['duration']
         
         speed_ratio = input_duration / actual_sped_duration if actual_sped_duration > 0 else 0
-        print(f"    Sped-up: {actual_sped_duration:.2f}s (speed ratio: {speed_ratio:.2f}x)")
+        print(f"    Result: {actual_sped_duration:.2f}s (ratio: {speed_ratio:.2f}x)")
         
-        if speed_ratio < 1.8:
-            print(f"    {Colors.YELLOW}⚠ Warning: Speed ratio lower than expected!{Colors.RESET}")
+        if speed_ratio < 1.95:
+            print(f"    {Colors.YELLOW}⚠ Warning: Speed ratio is {speed_ratio:.2f}x, expected 2.0x{Colors.RESET}")
         
         # Step 2: Duplicate
-        print(f"  Step 2/3: Duplicating video...")
+        print(f"  Step 2/3: Duplicating...")
         
         abs_temp_sped = os.path.abspath(temp_sped)
         with open(temp_list, 'w') as f:
@@ -573,17 +491,15 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         
         concat_info = get_video_info(temp_concat)
         concat_duration = concat_info['duration']
-        print(f"    Concatenated: {concat_duration:.2f}s")
+        print(f"    Result: {concat_duration:.2f}s")
         
         # Step 3: Add text overlay
-        print(f"  Step 3/3: Adding text overlay...")
+        print(f"  Step 3/3: Adding text...")
         
         target_size_mb = reference_size_mb * 1.15
         target_bitrate_total = (target_size_mb * 8 * 1024) / concat_duration
         audio_bitrate = 128
         target_video_bitrate = max(500, int(target_bitrate_total - audio_bitrate))
-        
-        print(f"    Target: {target_size_mb:.2f} MB, {target_video_bitrate} kbps")
         
         drawtext_filter = (
             f"drawtext=text='{text_escaped}':"
@@ -627,7 +543,6 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                     '-c:a', 'aac',
                     '-b:a', '128k',
                     '-movflags', '+faststart',
-                    '-max_muxing_queue_size', '1024',
                     '-y', output_path
                 ]
             else:
@@ -670,7 +585,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         cumulative_speed = 2 ** (iteration + 1)
         
         print(f"{Colors.GREEN}✓{Colors.RESET} Export {export_num} completed")
-        print(f"    Final duration: {final_duration:.2f}s | Cumulative speed: {cumulative_speed}x | FPS: {OUTPUT_FPS}")
+        print(f"    Duration: {final_duration:.2f}s | Speed: {cumulative_speed}x | FPS: {OUTPUT_FPS}")
         
         return True
         
@@ -698,15 +613,14 @@ def compile_exports(export_files, exports_dir):
         print(f"  Merging {len(export_files)} exports...")
         
         temp_list = os.path.join(exports_dir, f"temp_compile_list_{os.getpid()}.txt")
+        temp_concat = os.path.join(exports_dir, f"temp_compile_concat_{os.getpid()}.mp4")
         
         with open(temp_list, 'w') as f:
             for export_file in export_files:
                 abs_path = os.path.abspath(export_file)
                 f.write(f"file '{abs_path}'\n")
         
-        temp_concat = os.path.join(exports_dir, f"temp_compile_concat_{os.getpid()}.mp4")
-        
-        print(f"  Step 1/2: Concatenating exports...")
+        print(f"  Step 1/2: Concatenating...")
         
         cmd_concat = [
             'ffmpeg',
@@ -719,14 +633,14 @@ def compile_exports(export_files, exports_dir):
         
         result = subprocess.run(cmd_concat, capture_output=True, text=True)
         if result.returncode != 0:
-            raise RuntimeError(f"Compilation concat failed: {result.stderr[-300:]}")
+            raise RuntimeError(f"Concat failed: {result.stderr[-300:]}")
         
         valid, msg = verify_output_file(temp_concat)
         if not valid:
-            raise RuntimeError(f"Compilation concat invalid: {msg}")
+            raise RuntimeError(f"Concat invalid: {msg}")
         
         concat_info = get_video_info(temp_concat)
-        print(f"    Total duration: {concat_info['duration']:.2f}s")
+        print(f"    Duration: {concat_info['duration']:.2f}s")
         
         print(f"  Step 2/2: Adding watermark...")
         
@@ -769,7 +683,6 @@ def compile_exports(export_files, exports_dir):
                 '-c:a', 'aac',
                 '-b:a', '128k',
                 '-movflags', '+faststart',
-                '-max_muxing_queue_size', '1024',
                 '-y', output_path
             ]
             
@@ -794,7 +707,7 @@ def compile_exports(export_files, exports_dir):
                     pass
         
         if not success:
-            raise RuntimeError("Failed to add watermark with all codecs")
+            raise RuntimeError("Failed to add watermark")
         
         final_info = get_video_info(output_path)
         final_size = final_info['size'] / (1024 * 1024)
@@ -803,7 +716,6 @@ def compile_exports(export_files, exports_dir):
         print(f"  File: {output_name}.mp4")
         print(f"  Size: {final_size:.2f} MB")
         print(f"  Duration: {final_info['duration']:.2f}s")
-        print(f"  FPS: {OUTPUT_FPS}")
         
         return output_path
         
@@ -819,7 +731,6 @@ def check_file_size(file_path):
 def main():
     """Main function"""
     try:
-        # Print welcome message and instructions
         print_welcome()
         
         print("Checking dependencies...")
@@ -846,38 +757,30 @@ def main():
         
         print(f"\n{Colors.CYAN}Configuration:{Colors.RESET}")
         print(f"  Video: {video_path}")
-        print(f"  Codec: {initial_info.get('video_codec', 'unknown')}")
         print(f"  Size: {initial_size:.2f} MB")
         print(f"  Duration: {initial_duration:.2f}s")
         print(f"  Input FPS: {initial_info.get('fps', 30):.2f}")
         print(f"  Output FPS: {OUTPUT_FPS}")
         print(f"  Resolution: {initial_info.get('width', 0)}x{initial_info.get('height', 0)}")
         print(f"  Has Audio: {initial_info.get('has_audio', False)}")
-        print(f"  Target Volume: {target_volume_db:.1f}dB")
         print(f"  Exports: {num_exports}")
         print(f"  Starting Number: {start_num}")
-        print(f"  Pitch Increase: {'YES' if enable_pitch else 'NO'}")
+        print(f"  Pitch: {'YES' if enable_pitch else 'NO'}")
         if enable_pitch:
-            print(f"    Method: atempo=2.0 + rubberband=pitch={FIXED_PITCH_RATIO}")
-        print(f"  Rubberband: {'Available' if has_rubberband else 'NOT available'}")
+            print(f"    Pitch ratio: {FIXED_PITCH_RATIO}")
+        print(f"  Rubberband: {'Yes' if has_rubberband else 'No (fallback)'}")
         
         exports_dir = create_exports_folder()
-        
         exported_files = []
         
-        print(f"\n{Colors.ORANGE}Starting export process...{Colors.RESET}")
-        print(f"Flow: Original → Export 1 → Export 2 → ... → Export {num_exports}")
-        print()
+        print(f"\n{Colors.ORANGE}Starting exports...{Colors.RESET}")
+        print(f"Flow: Original → Export 1 → Export 2 → ... → Export {num_exports}\n")
         
         current_input = video_path
         reference_size = initial_size
         
         for i in range(num_exports):
             export_num = start_num + i
-            
-            if i >= num_exports:
-                print(f"\n{Colors.GREEN}✓{Colors.RESET} Export requirement met")
-                break
             
             current_pow = 2 ** export_num
             power_display = format_power_notation(current_pow)
@@ -886,20 +789,19 @@ def main():
             output_path, actual_name = get_unique_filename(exports_dir, base_name)
             
             if enable_pitch:
-                cumulative_semitones = (i + 1) * 1
-                pitch_info = f"+{cumulative_semitones} semitones total"
+                pitch_info = f"+{(i+1)} semitones"
             else:
                 pitch_info = "None"
             
             print(f"\n{Colors.BLUE}{'='*60}")
             print(f"[Export {i+1}/{num_exports}]")
             print(f"{'='*60}{Colors.RESET}")
-            print(f"  Export Number: {export_num}")
+            print(f"  Number: {export_num}")
             print(f"  Input: {os.path.basename(current_input)}")
             print(f"  Output: {actual_name}.mp4")
             print(f"  Text: '{export_num} - {power_display}'")
             print(f"  Pitch: {pitch_info}")
-            print(f"  Expected Speed: {2**(i+1)}x from original")
+            print(f"  Target Speed: {2**(i+1)}x from original")
             
             success = process_video_cumulative(
                 current_input,
@@ -919,9 +821,7 @@ def main():
             exported_files.append(output_path)
             
             output_size = check_file_size(output_path)
-            speedup = 2 ** (i + 1)
             size_percent = (output_size / initial_size) * 100
-            
             print(f"  Size: {output_size:.2f} MB ({size_percent:.1f}%)")
             
             current_input = output_path
@@ -930,8 +830,8 @@ def main():
         print(f"✓ ALL {num_exports} EXPORTS COMPLETED!")
         print(f"{'='*60}{Colors.RESET}")
         print(f"Location: {os.path.abspath(exports_dir)}")
-        print(f"\n{Colors.CYAN}Export Summary:{Colors.RESET}")
         
+        print(f"\n{Colors.CYAN}Summary:{Colors.RESET}")
         for i, export_file in enumerate(exported_files):
             export_num = start_num + i
             size = check_file_size(export_file)
@@ -939,20 +839,13 @@ def main():
             pow_val = 2 ** export_num
             pow_display = format_power_notation(pow_val)
             speedup = 2 ** (i + 1)
-            size_ratio = (size / initial_size) * 100
             
             if enable_pitch:
-                cumulative_semitones = (i + 1) * 1
-                pitch_display = f"+{cumulative_semitones}st"
+                pitch_display = f"+{i+1}st"
             else:
-                pitch_display = "None"
+                pitch_display = "-"
             
-            print(f"\n  {os.path.basename(export_file)}:")
-            print(f"    Size: {size:.2f} MB ({size_ratio:.1f}%)")
-            print(f"    Duration: {info['duration']:.2f}s")
-            print(f"    FPS: {OUTPUT_FPS}")
-            print(f"    Text: '{export_num} - {pow_display}'")
-            print(f"    Speed: {speedup}x | Pitch: {pitch_display}")
+            print(f"  {os.path.basename(export_file)}: {size:.2f}MB | {info['duration']:.1f}s | {speedup}x | {pitch_display}")
         
         print()
         compile_input = input(f"{Colors.CYAN}Compile all exports into Video? (N/Y):{Colors.RESET} ").strip().upper()
@@ -967,7 +860,7 @@ def main():
         print(f"{'='*60}{Colors.RESET}")
         
     except KeyboardInterrupt:
-        print(f"\n\n{Colors.YELLOW}⚠ Interrupted by user{Colors.RESET}")
+        print(f"\n\n{Colors.YELLOW}⚠ Interrupted{Colors.RESET}")
         sys.exit(1)
     except FileNotFoundError as e:
         print(f"\n{Colors.RED}❌ File Error: {e}{Colors.RESET}")
