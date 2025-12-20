@@ -67,7 +67,7 @@ def check_dependencies():
     if has_rubberband:
         print(f"{Colors.GREEN}✓{Colors.RESET} Rubberband filter available")
     else:
-        print(f"{Colors.YELLOW}⚠{Colors.RESET} Rubberband filter NOT available")
+        print(f"{Colors.YELLOW}⚠{Colors.RESET} Rubberband filter NOT available (will use atempo fallback)")
     
     if has_loudnorm:
         print(f"{Colors.GREEN}✓{Colors.RESET} Loudnorm filter available")
@@ -362,7 +362,7 @@ def verify_output_file(file_path, min_size_kb=70):
 
 def process_video_cumulative(input_path, output_path, export_num, iteration, reference_size_mb, 
                              enable_pitch, has_rubberband, has_loudnorm, target_volume_db):
-    """Process video cumulatively - SIMPLE VERSION"""
+    """Process video cumulatively using rubberband for tempo"""
     
     temp_files = []
     
@@ -402,27 +402,30 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         
         temp_files = [temp_sped, temp_list, temp_concat]
         
-        # Step 1: Speed up - SIMPLE, GUARANTEED 2X
-        # Video: setpts=0.5*PTS (exactly 2x)
-        # Audio: atempo=2.0 (exactly 2x)
-        # Pitch: separate rubberband pitch-only filter
-        
+        # Step 1: Speed up using rubberband tempo
         if has_audio:
-            if enable_pitch and has_rubberband:
-                print(f"  Step 1/3: Speed 2x + Pitch...")
-                # atempo for speed, rubberband for pitch ONLY
-                audio_filter = f"atempo=2.0,rubberband=pitch={FIXED_PITCH_RATIO},volume={volume_adjustment}dB"
-            elif enable_pitch and not has_rubberband:
-                print(f"  Step 1/3: Speed 2x + Pitch (asetrate fallback)...")
-                pitched_rate = int(44100 * FIXED_PITCH_RATIO)
-                audio_filter = f"atempo=2.0,asetrate={pitched_rate},aresample=44100,volume={volume_adjustment}dB"
+            if has_rubberband:
+                if enable_pitch:
+                    # Rubberband: tempo=2.0 for speed, pitch for pitch shift
+                    print(f"  Step 1/3: rubberband tempo=2.0 pitch={FIXED_PITCH_RATIO}...")
+                    audio_filter = f"rubberband=tempo=2.0:pitch={FIXED_PITCH_RATIO},volume={volume_adjustment}dB"
+                else:
+                    # Rubberband: tempo=2.0 only
+                    print(f"  Step 1/3: rubberband tempo=2.0...")
+                    audio_filter = f"rubberband=tempo=2.0,volume={volume_adjustment}dB"
             else:
-                print(f"  Step 1/3: Speed 2x (no pitch)...")
-                audio_filter = f"atempo=2.0,volume={volume_adjustment}dB"
+                # Fallback: atempo
+                if enable_pitch:
+                    print(f"  Step 1/3: atempo=2.0 + asetrate (fallback)...")
+                    pitched_rate = int(44100 * FIXED_PITCH_RATIO)
+                    audio_filter = f"atempo=2.0,asetrate={pitched_rate},aresample=44100,volume={volume_adjustment}dB"
+                else:
+                    print(f"  Step 1/3: atempo=2.0 (fallback)...")
+                    audio_filter = f"atempo=2.0,volume={volume_adjustment}dB"
             
             cmd_speed = [
                 'ffmpeg', '-i', input_path,
-                '-vf', f'setpts=0.5*PTS',
+                '-vf', 'setpts=0.5*PTS',
                 '-af', audio_filter,
                 '-c:v', 'libx264',
                 '-preset', 'fast',
@@ -434,10 +437,10 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                 '-y', temp_sped
             ]
         else:
-            print(f"  Step 1/3: Speed 2x (no audio)...")
+            print(f"  Step 1/3: setpts=0.5*PTS (no audio)...")
             cmd_speed = [
                 'ffmpeg', '-i', input_path,
-                '-vf', f'setpts=0.5*PTS',
+                '-vf', 'setpts=0.5*PTS',
                 '-c:v', 'libx264',
                 '-preset', 'fast',
                 '-crf', '23',
@@ -462,7 +465,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         print(f"    Result: {actual_sped_duration:.2f}s (ratio: {speed_ratio:.2f}x)")
         
         if speed_ratio < 1.95:
-            print(f"    {Colors.YELLOW}⚠ Warning: Speed ratio is {speed_ratio:.2f}x, expected 2.0x{Colors.RESET}")
+            print(f"    {Colors.YELLOW}⚠ Speed ratio is {speed_ratio:.2f}x, expected 2.0x{Colors.RESET}")
         
         # Step 2: Duplicate
         print(f"  Step 2/3: Duplicating...")
@@ -766,9 +769,12 @@ def main():
         print(f"  Exports: {num_exports}")
         print(f"  Starting Number: {start_num}")
         print(f"  Pitch: {'YES' if enable_pitch else 'NO'}")
-        if enable_pitch:
-            print(f"    Pitch ratio: {FIXED_PITCH_RATIO}")
-        print(f"  Rubberband: {'Yes' if has_rubberband else 'No (fallback)'}")
+        print(f"  Audio Method: {'rubberband' if has_rubberband else 'atempo (fallback)'}")
+        if has_rubberband:
+            if enable_pitch:
+                print(f"    Filter: rubberband=tempo=2.0:pitch={FIXED_PITCH_RATIO}")
+            else:
+                print(f"    Filter: rubberband=tempo=2.0")
         
         exports_dir = create_exports_folder()
         exported_files = []
