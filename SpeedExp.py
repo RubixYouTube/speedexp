@@ -10,7 +10,8 @@ import time
 
 # Try to import moviepy
 try:
-    from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, concatenate_videoclips
+    import moviepy
+    import moviepy.editor
     MOVIEPY_AVAILABLE = True
 except ImportError:
     MOVIEPY_AVAILABLE = False
@@ -379,10 +380,10 @@ def finish_progress_bar():
     """Finish progress bar and move to new line"""
     print()  # New line after progress
 
-def get_user_inputs(use_moviepy=False):
+def get_user_inputs(use_editor_selection=False):
     """Get and validate user inputs"""
     try:
-        if use_moviepy:
+        if use_editor_selection:
             video_path = select_video_from_movies()
         else:
             video_path = input("Video File Location?: ").strip()
@@ -533,18 +534,18 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         power_text = format_power_notation(export_pow)
         text_string = f"{export_num} - {power_text}"
         
-        # Load video
-        video = VideoFileClip(input_path)
+        # Load video using moviepy.editor
+        video = moviepy.editor.VideoFileClip(input_path)
         
         # Speed up by 2x (this naturally raises pitch)
         sped_video = video.speedx(2)
         
         # Concatenate (duplicate)
-        final_video = concatenate_videoclips([sped_video, sped_video])
+        final_video = moviepy.editor.concatenate_videoclips([sped_video, sped_video])
         
         # Create text clip
         try:
-            txt_clip = TextClip(
+            txt_clip = moviepy.editor.TextClip(
                 text_string,
                 fontsize=111,
                 color='red',
@@ -555,7 +556,7 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         except:
             # Fallback font
             try:
-                txt_clip = TextClip(
+                txt_clip = moviepy.editor.TextClip(
                     text_string,
                     fontsize=111,
                     color='red',
@@ -563,7 +564,7 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
                     stroke_width=3
                 )
             except:
-                txt_clip = TextClip(
+                txt_clip = moviepy.editor.TextClip(
                     text_string,
                     fontsize=80,
                     color='red'
@@ -572,7 +573,7 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         txt_clip = txt_clip.set_position((20, final_video.h - 150)).set_duration(final_video.duration)
         
         # Composite
-        result_video = CompositeVideoClip([final_video, txt_clip])
+        result_video = moviepy.editor.CompositeVideoClip([final_video, txt_clip])
         
         # Write output (suppress moviepy output)
         result_video.write_videofile(
@@ -1170,8 +1171,28 @@ def main():
         elif moviepy_input != 'N':
             print("  Invalid input, using FFmpeg...\n")
         
-        # Get user inputs (with movie folder selection if moviepy)
-        video_path, num_exports, start_num, enable_pitch = get_user_inputs(use_moviepy)
+        # Ask about video editor folder selection (available for both modes)
+        use_editor_selection = False
+        editor_input = input("\nSelect from video editor folders? (N/Y): ").strip().upper()
+        
+        if editor_input == 'Y':
+            # Check if movies folder exists
+            movies_path, directories = get_movies_directories()
+            if movies_path and directories:
+                use_editor_selection = True
+            else:
+                print("  ❌ No video editor folders found!")
+                if not movies_path:
+                    print("  Movies folder not found in any known location.")
+                else:
+                    print(f"  No subdirectories in: {movies_path}")
+                print("  Falling back to manual input...\n")
+                use_editor_selection = False
+        elif editor_input != 'N':
+            print("  Invalid input, using manual input...\n")
+        
+        # Get user inputs
+        video_path, num_exports, start_num, enable_pitch = get_user_inputs(use_editor_selection)
         
         initial_info = get_video_info(video_path)
         initial_size = initial_info['size'] / (1024 * 1024)
