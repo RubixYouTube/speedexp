@@ -8,13 +8,73 @@ import json
 import re
 import time
 
-# Try to import moviepy
+# Try to import moviepy, scan Termux if not found
+MOVIEPY_AVAILABLE = False
+MOVIEPY_ERROR = None
+
+def find_moviepy_in_termux():
+    """Scan Termux directories to find moviepy"""
+    termux_paths = [
+        "/data/data/com.termux/files/usr/lib/python3.11/site-packages",
+        "/data/data/com.termux/files/usr/lib/python3.10/site-packages",
+        "/data/data/com.termux/files/usr/lib/python3.9/site-packages",
+        "/data/data/com.termux/files/usr/lib/python3/site-packages",
+        "/data/data/com.termux/files/home/.local/lib/python3.11/site-packages",
+        "/data/data/com.termux/files/home/.local/lib/python3.10/site-packages",
+        "/data/data/com.termux/files/home/.local/lib/python3.9/site-packages",
+    ]
+    
+    # Also check current Python's site-packages
+    try:
+        import site
+        termux_paths.extend(site.getsitepackages())
+        termux_paths.append(site.getusersitepackages())
+    except:
+        pass
+    
+    for path in termux_paths:
+        if os.path.exists(path):
+            moviepy_path = os.path.join(path, "moviepy")
+            if os.path.isdir(moviepy_path):
+                return moviepy_path
+    
+    # Deep scan of Termux
+    termux_base = "/data/data/com.termux/files"
+    if os.path.exists(termux_base):
+        try:
+            for root, dirs, files in os.walk(termux_base):
+                if "moviepy" in dirs:
+                    moviepy_path = os.path.join(root, "moviepy")
+                    # Check if it's a valid Python package
+                    if os.path.exists(os.path.join(moviepy_path, "__init__.py")) or \
+                       os.path.exists(os.path.join(moviepy_path, "editor.py")):
+                        return moviepy_path
+                # Limit search depth
+                if root.count(os.sep) - termux_base.count(os.sep) > 10:
+                    dirs.clear()
+        except PermissionError:
+            pass
+    
+    return None
+
 try:
-    import moviepy
-    import moviepy.editor
+    from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, concatenate_videoclips
     MOVIEPY_AVAILABLE = True
-except ImportError:
-    MOVIEPY_AVAILABLE = False
+except ImportError as e:
+    MOVIEPY_ERROR = str(e)
+    # Try to find moviepy in Termux
+    moviepy_location = find_moviepy_in_termux()
+    if moviepy_location:
+        # Try adding parent directory to path and import again
+        parent_dir = os.path.dirname(moviepy_location)
+        if parent_dir not in sys.path:
+            sys.path.insert(0, parent_dir)
+        try:
+            from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, concatenate_videoclips
+            MOVIEPY_AVAILABLE = True
+            MOVIEPY_ERROR = None
+        except ImportError as e2:
+            MOVIEPY_ERROR = f"Found at {moviepy_location} but import failed: {e2}"
 
 # Fixed pitch ratio: 2^(1/12) = 1 semitone up
 FIXED_PITCH_RATIO = 1.059463094352953
@@ -33,7 +93,9 @@ def check_dependencies():
     if MOVIEPY_AVAILABLE:
         print("✓ MoviePy available")
     else:
-        print("⚠ MoviePy NOT available (pip install moviepy)")
+        print(f"⚠ MoviePy NOT available")
+        if MOVIEPY_ERROR:
+            print(f"  Error: {MOVIEPY_ERROR}")
     
     result = subprocess.run(['ffmpeg', '-filters'], capture_output=True, text=True)
     has_rubberband = 'rubberband' in result.stdout
@@ -523,6 +585,9 @@ def find_existing_exports(exports_dir):
 def process_video_moviepy(input_path, output_path, export_num, iteration, enable_pitch, 
                           original_fps):
     """Process video using moviepy"""
+    if not MOVIEPY_AVAILABLE:
+        raise RuntimeError(f"MoviePy not available: {MOVIEPY_ERROR}")
+    
     video = None
     sped_video = None
     final_video = None
@@ -534,18 +599,18 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         power_text = format_power_notation(export_pow)
         text_string = f"{export_num} - {power_text}"
         
-        # Load video using moviepy.editor
-        video = moviepy.editor.VideoFileClip(input_path)
+        # Load video
+        video = VideoFileClip(input_path)
         
         # Speed up by 2x (this naturally raises pitch)
         sped_video = video.speedx(2)
         
         # Concatenate (duplicate)
-        final_video = moviepy.editor.concatenate_videoclips([sped_video, sped_video])
+        final_video = concatenate_videoclips([sped_video, sped_video])
         
         # Create text clip
         try:
-            txt_clip = moviepy.editor.TextClip(
+            txt_clip = TextClip(
                 text_string,
                 fontsize=111,
                 color='red',
@@ -556,7 +621,7 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         except:
             # Fallback font
             try:
-                txt_clip = moviepy.editor.TextClip(
+                txt_clip = TextClip(
                     text_string,
                     fontsize=111,
                     color='red',
@@ -564,7 +629,7 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
                     stroke_width=3
                 )
             except:
-                txt_clip = moviepy.editor.TextClip(
+                txt_clip = TextClip(
                     text_string,
                     fontsize=80,
                     color='red'
@@ -573,7 +638,7 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         txt_clip = txt_clip.set_position((20, final_video.h - 150)).set_duration(final_video.duration)
         
         # Composite
-        result_video = moviepy.editor.CompositeVideoClip([final_video, txt_clip])
+        result_video = CompositeVideoClip([final_video, txt_clip])
         
         # Write output (suppress moviepy output)
         result_video.write_videofile(
@@ -1161,10 +1226,12 @@ def main():
         
         if moviepy_input == 'Y':
             if not MOVIEPY_AVAILABLE:
-                print("  ❌ MoviePy is not installed!")
+                print("  ❌ MoviePy is not installed or not found!")
+                if MOVIEPY_ERROR:
+                    print(f"  Error: {MOVIEPY_ERROR}")
                 print("  Install with: pip install moviepy")
-                print("  Falling back to FFmpeg...\n")
-                use_moviepy = False
+                print("  Scanned Termux directories but moviepy was not found.")
+                raise SystemError("MoviePy not available. Please install it with: pip install moviepy")
             else:
                 print("  ✓ Using MoviePy mode")
                 use_moviepy = True
