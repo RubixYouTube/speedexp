@@ -58,7 +58,8 @@ def find_moviepy_in_termux():
     return None
 
 try:
-    from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, concatenate_videoclips
+    import moviepy
+    import moviepy.editor
     MOVIEPY_AVAILABLE = True
 except ImportError as e:
     MOVIEPY_ERROR = str(e)
@@ -70,7 +71,8 @@ except ImportError as e:
         if parent_dir not in sys.path:
             sys.path.insert(0, parent_dir)
         try:
-            from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, concatenate_videoclips
+            import moviepy
+            import moviepy.editor
             MOVIEPY_AVAILABLE = True
             MOVIEPY_ERROR = None
         except ImportError as e2:
@@ -583,7 +585,7 @@ def find_existing_exports(exports_dir):
     return export_files
 
 def process_video_moviepy(input_path, output_path, export_num, iteration, enable_pitch, 
-                          original_fps):
+                          original_fps, has_rubberband):
     """Process video using moviepy"""
     if not MOVIEPY_AVAILABLE:
         raise RuntimeError(f"MoviePy not available: {MOVIEPY_ERROR}")
@@ -593,24 +595,71 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
     final_video = None
     txt_clip = None
     result_video = None
+    temp_files = []
     
     try:
         export_pow = 2 ** export_num
         power_text = format_power_notation(export_pow)
         text_string = f"{export_num} - {power_text}"
         
-        # Load video
-        video = VideoFileClip(input_path)
+        temp_dir = os.path.dirname(output_path)
         
-        # Speed up by 2x (this naturally raises pitch)
-        sped_video = video.speedx(2)
+        # Load video
+        video = moviepy.editor.VideoFileClip(input_path)
+        has_audio = video.audio is not None
+        
+        if enable_pitch:
+            # Speed up with pitch change (natural speedup behavior)
+            sped_video = video.speedx(2)
+        else:
+            # Speed up without pitch change
+            if has_audio:
+                # Speed up video without audio first
+                video_no_audio = video.without_audio()
+                sped_video_only = video_no_audio.speedx(2)
+                
+                # Extract and process audio with ffmpeg to maintain pitch
+                temp_audio_in = os.path.join(temp_dir, f"temp_audio_in_{export_num}_{os.getpid()}.aac")
+                temp_audio_out = os.path.join(temp_dir, f"temp_audio_out_{export_num}_{os.getpid()}.aac")
+                temp_files.extend([temp_audio_in, temp_audio_out])
+                
+                # Extract audio using ffmpeg
+                cmd_extract = [
+                    'ffmpeg', '-i', input_path,
+                    '-vn', '-acodec', 'aac', '-y', temp_audio_in
+                ]
+                subprocess.run(cmd_extract, capture_output=True)
+                
+                # Speed up audio without pitch change
+                if has_rubberband:
+                    audio_filter = "rubberband=tempo=2.0"
+                else:
+                    audio_filter = "atempo=2.0"
+                
+                cmd_audio = [
+                    'ffmpeg', '-i', temp_audio_in,
+                    '-af', audio_filter,
+                    '-acodec', 'aac', '-y', temp_audio_out
+                ]
+                subprocess.run(cmd_audio, capture_output=True)
+                
+                # Load processed audio and combine
+                if os.path.exists(temp_audio_out):
+                    processed_audio = moviepy.editor.AudioFileClip(temp_audio_out)
+                    sped_video = sped_video_only.set_audio(processed_audio)
+                else:
+                    # Fallback: no audio
+                    sped_video = sped_video_only
+            else:
+                # No audio, just speed up
+                sped_video = video.speedx(2)
         
         # Concatenate (duplicate)
-        final_video = concatenate_videoclips([sped_video, sped_video])
+        final_video = moviepy.editor.concatenate_videoclips([sped_video, sped_video])
         
         # Create text clip
         try:
-            txt_clip = TextClip(
+            txt_clip = moviepy.editor.TextClip(
                 text_string,
                 fontsize=111,
                 color='red',
@@ -621,7 +670,7 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         except:
             # Fallback font
             try:
-                txt_clip = TextClip(
+                txt_clip = moviepy.editor.TextClip(
                     text_string,
                     fontsize=111,
                     color='red',
@@ -629,7 +678,7 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
                     stroke_width=3
                 )
             except:
-                txt_clip = TextClip(
+                txt_clip = moviepy.editor.TextClip(
                     text_string,
                     fontsize=80,
                     color='red'
@@ -638,7 +687,7 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         txt_clip = txt_clip.set_position((20, final_video.h - 150)).set_duration(final_video.duration)
         
         # Composite
-        result_video = CompositeVideoClip([final_video, txt_clip])
+        result_video = moviepy.editor.CompositeVideoClip([final_video, txt_clip])
         
         # Write output (suppress moviepy output)
         result_video.write_videofile(
@@ -656,11 +705,19 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         raise RuntimeError(f"MoviePy error: {e}")
         
     finally:
-        # Cleanup
+        # Cleanup clips
         for clip in [video, sped_video, final_video, txt_clip, result_video]:
             if clip is not None:
                 try:
                     clip.close()
+                except:
+                    pass
+        
+        # Cleanup temp files
+        for temp_file in temp_files:
+            if temp_file and os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
                 except:
                     pass
 
@@ -671,7 +728,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
     
     if use_moviepy:
         return process_video_moviepy(input_path, output_path, export_num, iteration, 
-                                     enable_pitch, original_fps)
+                                     enable_pitch, original_fps, has_rubberband)
     
     temp_files = []
     
@@ -1285,7 +1342,9 @@ def main():
             print(f"    Filter: rubberband=pitch={FIXED_PITCH_RATIO}:tempo=2.0")
             print(f"    Applied to each export (compounds naturally)")
         elif enable_pitch and use_moviepy:
-            print(f"    Note: MoviePy speedup naturally raises pitch")
+            print(f"    Note: MoviePy speedup will raise pitch naturally")
+        elif use_moviepy:
+            print(f"    Note: Audio pitch preserved using ffmpeg atempo/rubberband")
         if not use_moviepy:
             print(f"  Rubberband: {'Available' if has_rubberband else 'NOT available (fallback)'}")
             print(f"  Preset: fast")
