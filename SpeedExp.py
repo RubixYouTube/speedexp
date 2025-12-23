@@ -58,7 +58,8 @@ def find_moviepy_in_termux():
     return None
 
 try:
-    from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, concatenate_videoclips
+    import moviepy
+    import moviepy.editor
     MOVIEPY_AVAILABLE = True
 except ImportError as e:
     MOVIEPY_ERROR = str(e)
@@ -70,7 +71,8 @@ except ImportError as e:
         if parent_dir not in sys.path:
             sys.path.insert(0, parent_dir)
         try:
-            from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip, concatenate_videoclips
+            import moviepy
+            import moviepy.editor
             MOVIEPY_AVAILABLE = True
             MOVIEPY_ERROR = None
         except ImportError as e2:
@@ -78,6 +80,9 @@ except ImportError as e:
 
 # Fixed pitch ratio: 2^(1/12) = 1 semitone up
 FIXED_PITCH_RATIO = 1.059463094352953
+
+# Default text size
+DEFAULT_TEXT_SIZE = 111
 
 def check_dependencies():
     """Check if required dependencies are installed"""
@@ -142,7 +147,7 @@ def get_available_codecs():
         print(f"  Warning: Could not detect codecs: {e}")
         return {'libx264': True, 'mpeg4': True}
 
-def select_codec_configs():
+def select_codec_configs(preset='fast'):
     """Select codec configurations to try"""
     available = get_available_codecs()
     
@@ -152,14 +157,14 @@ def select_codec_configs():
         configs.append({
             'name': 'H.264 Baseline',
             'codec': 'libx264',
-            'params': ['-profile:v', 'baseline', '-level', '3.0', '-pix_fmt', 'yuv420p', '-preset', 'fast']
+            'params': ['-profile:v', 'baseline', '-level', '3.0', '-pix_fmt', 'yuv420p', '-preset', preset]
         })
     
     if available.get('libx264'):
         configs.append({
             'name': 'H.264 Main',
             'codec': 'libx264',
-            'params': ['-profile:v', 'main', '-pix_fmt', 'yuv420p', '-preset', 'fast']
+            'params': ['-profile:v', 'main', '-pix_fmt', 'yuv420p', '-preset', preset]
         })
         configs.append({
             'name': 'H.264 Ultrafast',
@@ -480,7 +485,41 @@ def get_user_inputs(use_editor_selection=False):
         else:
             enable_pitch = pitch_input == 'Y'
         
-        return video_path, num_exports, start_num, enable_pitch
+        # Text size input
+        text_size_input = input("Change text size to num?: ").strip()
+        if text_size_input == '' or not text_size_input.isdigit():
+            if text_size_input != '':
+                print("  Error!: invalid size.")
+            text_size = DEFAULT_TEXT_SIZE
+        else:
+            text_size = int(text_size_input)
+            if text_size <= 0:
+                print("  Error!: invalid size.")
+                text_size = DEFAULT_TEXT_SIZE
+        
+        # Color mode input
+        color_mode_input = input("Use Color Mode (N/Y)?: ").strip().upper()
+        if color_mode_input not in ['N', 'Y']:
+            print("  Invalid input, defaulting to N")
+            enable_color_mode = False
+        else:
+            enable_color_mode = color_mode_input == 'Y'
+        
+        # Fast exports input
+        fast_export_input = input("Use fast exports? (N/Y/Z/U)?: ").strip().upper()
+        if fast_export_input == 'Y':
+            preset = 'veryfast'
+        elif fast_export_input == 'Z':
+            preset = 'superfast'
+        elif fast_export_input == 'U':
+            preset = 'ultrafast'
+        elif fast_export_input == 'N':
+            preset = 'fast'
+        else:
+            print("  Invalid input, defaulting to fast")
+            preset = 'fast'
+        
+        return video_path, num_exports, start_num, enable_pitch, text_size, enable_color_mode, preset
         
     except Exception as e:
         raise e
@@ -583,7 +622,7 @@ def find_existing_exports(exports_dir):
     return export_files
 
 def process_video_moviepy(input_path, output_path, export_num, iteration, enable_pitch, 
-                          original_fps):
+                          original_fps, has_rubberband, text_size, enable_color_mode, preset):
     """Process video using moviepy"""
     if not MOVIEPY_AVAILABLE:
         raise RuntimeError(f"MoviePy not available: {MOVIEPY_ERROR}")
@@ -593,26 +632,73 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
     final_video = None
     txt_clip = None
     result_video = None
+    temp_files = []
     
     try:
         export_pow = 2 ** export_num
         power_text = format_power_notation(export_pow)
         text_string = f"{export_num} - {power_text}"
         
-        # Load video
-        video = VideoFileClip(input_path)
+        temp_dir = os.path.dirname(output_path)
         
-        # Speed up by 2x (this naturally raises pitch)
-        sped_video = video.speedx(2)
+        # Load video
+        video = moviepy.editor.VideoFileClip(input_path)
+        has_audio = video.audio is not None
+        
+        if enable_pitch:
+            # Speed up with pitch change (natural speedup behavior)
+            sped_video = video.speedx(2)
+        else:
+            # Speed up without pitch change
+            if has_audio:
+                # Speed up video without audio first
+                video_no_audio = video.without_audio()
+                sped_video_only = video_no_audio.speedx(2)
+                
+                # Extract and process audio with ffmpeg to maintain pitch
+                temp_audio_in = os.path.join(temp_dir, f"temp_audio_in_{export_num}_{os.getpid()}.aac")
+                temp_audio_out = os.path.join(temp_dir, f"temp_audio_out_{export_num}_{os.getpid()}.aac")
+                temp_files.extend([temp_audio_in, temp_audio_out])
+                
+                # Extract audio using ffmpeg
+                cmd_extract = [
+                    'ffmpeg', '-i', input_path,
+                    '-vn', '-acodec', 'aac', '-y', temp_audio_in
+                ]
+                subprocess.run(cmd_extract, capture_output=True)
+                
+                # Speed up audio without pitch change
+                if has_rubberband:
+                    audio_filter = "rubberband=tempo=2.0"
+                else:
+                    audio_filter = "atempo=2.0"
+                
+                cmd_audio = [
+                    'ffmpeg', '-i', temp_audio_in,
+                    '-af', audio_filter,
+                    '-acodec', 'aac', '-y', temp_audio_out
+                ]
+                subprocess.run(cmd_audio, capture_output=True)
+                
+                # Load processed audio and combine
+                if os.path.exists(temp_audio_out):
+                    processed_audio = moviepy.editor.AudioFileClip(temp_audio_out)
+                    sped_video = sped_video_only.set_audio(processed_audio)
+                else:
+                    # Fallback: no audio
+                    sped_video = sped_video_only
+            else:
+                # No audio, just speed up
+                sped_video = video.speedx(2)
         
         # Concatenate (duplicate)
-        final_video = concatenate_videoclips([sped_video, sped_video])
+        final_video = moviepy.editor.concatenate_videoclips([sped_video, sped_video])
         
         # Create text clip
         try:
-            txt_clip = TextClip(
+            txt_clip = moviepy.editor.TextClip(
                 text_string,
-                fontsize=111,
+                fontsize=text_size,
                 color='red',
                 stroke_color='blue',
                 stroke_width=3,
@@ -621,34 +707,61 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         except:
             # Fallback font
             try:
-                txt_clip = TextClip(
+                txt_clip = moviepy.editor.TextClip(
                     text_string,
-                    fontsize=111,
+                    fontsize=text_size,
                     color='red',
                     stroke_color='blue',
                     stroke_width=3
                 )
             except:
-                txt_clip = TextClip(
+                txt_clip = moviepy.editor.TextClip(
                     text_string,
-                    fontsize=80,
+                    fontsize=min(text_size, 80),
                     color='red'
                 )
         
         txt_clip = txt_clip.set_position((20, final_video.h - 150)).set_duration(final_video.duration)
         
         # Composite
-        result_video = CompositeVideoClip([final_video, txt_clip])
+        result_video = moviepy.editor.CompositeVideoClip([final_video, txt_clip])
         
-        # Write output (suppress moviepy output)
-        result_video.write_videofile(
-            output_path,
-            fps=original_fps,
-            codec='libx264',
-            audio_codec='aac',
-            verbose=False,
-            logger=None
-        )
+        # Write to temp file first if color mode is enabled
+        if enable_color_mode:
+            temp_output = os.path.join(temp_dir, f"temp_nocolor_{export_num}_{os.getpid()}.mp4")
+            temp_files.append(temp_output)
+            
+            result_video.write_videofile(
+                temp_output,
+                fps=original_fps,
+                codec='libx264',
+                audio_codec='aac',
+                preset=preset,
+                verbose=False,
+                logger=None
+            )
+            
+            # Apply hue shift using ffmpeg
+            cmd_hue = [
+                'ffmpeg', '-i', temp_output,
+                '-vf', 'hue=h=25',
+                '-c:v', 'libx264',
+                '-preset', preset,
+                '-c:a', 'copy',
+                '-y', output_path
+            ]
+            subprocess.run(cmd_hue, capture_output=True)
+        else:
+            # Write output directly
+            result_video.write_videofile(
+                output_path,
+                fps=original_fps,
+                codec='libx264',
+                audio_codec='aac',
+                preset=preset,
+                verbose=False,
+                logger=None
+            )
         
         return True
         
@@ -656,22 +769,32 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         raise RuntimeError(f"MoviePy error: {e}")
         
     finally:
-        # Cleanup
+        # Cleanup clips
         for clip in [video, sped_video, final_video, txt_clip, result_video]:
             if clip is not None:
                 try:
                     clip.close()
                 except:
                     pass
+        
+        # Cleanup temp files
+        for temp_file in temp_files:
+            if temp_file and os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
 
 def process_video_cumulative(input_path, output_path, export_num, iteration, reference_size_mb, 
                              enable_pitch, has_rubberband, has_loudnorm, target_volume_db, 
-                             original_fps, use_moviepy=False, silent=False):
+                             original_fps, use_moviepy=False, silent=False, text_size=DEFAULT_TEXT_SIZE,
+                             enable_color_mode=False, preset='fast'):
     """Process video cumulatively with rubberband pitch+tempo"""
     
     if use_moviepy:
         return process_video_moviepy(input_path, output_path, export_num, iteration, 
-                                     enable_pitch, original_fps)
+                                     enable_pitch, original_fps, has_rubberband, text_size,
+                                     enable_color_mode, preset)
     
     temp_files = []
     
@@ -732,7 +855,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                 '-map', '[v]',
                 '-map', '[a]',
                 '-c:v', 'libx264',
-                '-preset', 'fast',
+                '-preset', preset,
                 '-crf', '23',
                 '-pix_fmt', 'yuv420p',
                 '-r', str(original_fps),
@@ -756,7 +879,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                 '-map', '[v]',
                 '-map', '[a]',
                 '-c:v', 'libx264',
-                '-preset', 'fast',
+                '-preset', preset,
                 '-crf', '23',
                 '-pix_fmt', 'yuv420p',
                 '-r', str(original_fps),
@@ -781,7 +904,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                 '-map', '[v]',
                 '-map', '[a]',
                 '-c:v', 'libx264',
-                '-preset', 'fast',
+                '-preset', preset,
                 '-crf', '23',
                 '-pix_fmt', 'yuv420p',
                 '-r', str(original_fps),
@@ -805,7 +928,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                 '-map', '[v]',
                 '-map', '[a]',
                 '-c:v', 'libx264',
-                '-preset', 'fast',
+                '-preset', preset,
                 '-crf', '23',
                 '-pix_fmt', 'yuv420p',
                 '-r', str(original_fps),
@@ -824,7 +947,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                 'ffmpeg', '-i', input_path,
                 '-vf', 'setpts=0.5*PTS',
                 '-c:v', 'libx264',
-                '-preset', 'fast',
+                '-preset', preset,
                 '-crf', '23',
                 '-pix_fmt', 'yuv420p',
                 '-r', str(original_fps),
@@ -881,7 +1004,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         if not silent:
             print(f"    Concatenated: {concat_duration:.2f}s")
         
-        # Step 3: Add text overlay
+        # Step 3: Add text overlay (and color shift if enabled)
         if not silent:
             print(f"  Step 3/3: Adding text and exporting...")
         
@@ -897,12 +1020,18 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
             f"drawtext=text='{text_escaped}':"
             f"fontcolor=red:"
             f"bordercolor=blue:borderw=3:"
-            f"fontsize=111:"
+            f"fontsize={text_size}:"
             f"box=1:boxcolor=black@0.12:boxborderw=8:"
             f"x=20:y=h-th-20"
         )
         
-        codec_configs = select_codec_configs()
+        # Add hue shift if color mode is enabled
+        if enable_color_mode:
+            video_filter = f"{drawtext_filter},hue=h=25"
+        else:
+            video_filter = drawtext_filter
+        
+        codec_configs = select_codec_configs(preset)
         success = False
         last_error = None
         
@@ -926,7 +1055,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
             if concat_info.get('has_audio', True):
                 cmd_text = [
                     'ffmpeg', '-i', temp_concat,
-                    '-vf', drawtext_filter,
+                    '-vf', video_filter,
                     '-c:v', codec
                 ] + codec_params + [
                     '-b:v', f'{target_video_bitrate}k',
@@ -942,7 +1071,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
             else:
                 cmd_text = [
                     'ffmpeg', '-i', temp_concat,
-                    '-vf', drawtext_filter,
+                    '-vf', video_filter,
                     '-c:v', codec
                 ] + codec_params + [
                     '-b:v', f'{target_video_bitrate}k',
@@ -998,7 +1127,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                 except:
                     pass
 
-def compile_exports(export_files, exports_dir, original_fps):
+def compile_exports(export_files, exports_dir, original_fps, preset='fast'):
     """Compile all exports into single video with watermark"""
     try:
         print(f"\n{'='*60}")
@@ -1054,7 +1183,7 @@ def compile_exports(export_files, exports_dir, original_fps):
             f"x=w-tw-20:y=20"
         )
         
-        codec_configs = select_codec_configs()
+        codec_configs = select_codec_configs(preset)
         success = False
         
         for codec_config in codec_configs:
@@ -1128,7 +1257,7 @@ def check_file_size(file_path):
         return os.path.getsize(file_path) / (1024 * 1024)
     return 0
 
-def compile_existing_exports_mode(exports_dir):
+def compile_existing_exports_mode(exports_dir, preset='fast'):
     """Handle compilation of existing export files"""
     print(f"\n{'='*60}")
     print("COMPILE EXISTING EXPORTS MODE")
@@ -1180,7 +1309,7 @@ def compile_existing_exports_mode(exports_dir):
     # Extract just the file paths for compile_exports
     export_file_paths = [f[2] for f in existing_exports]
     
-    compile_exports(export_file_paths, exports_dir, original_fps)
+    compile_exports(export_file_paths, exports_dir, original_fps, preset)
     
     return True
 
@@ -1209,7 +1338,18 @@ def main():
         compile_existing_input = input("\nCompile Existing export files? (N/Y): ").strip().upper()
         
         if compile_existing_input == 'Y':
-            result = compile_existing_exports_mode(exports_dir)
+            # Ask for preset for compilation
+            fast_export_input = input("Use fast exports? (N/Y/Z/U)?: ").strip().upper()
+            if fast_export_input == 'Y':
+                preset = 'veryfast'
+            elif fast_export_input == 'Z':
+                preset = 'superfast'
+            elif fast_export_input == 'U':
+                preset = 'ultrafast'
+            else:
+                preset = 'fast'
+            
+            result = compile_existing_exports_mode(exports_dir, preset)
             if result:
                 print(f"\n{'='*60}")
                 print("✓ ALL DONE!")
@@ -1259,7 +1399,7 @@ def main():
             print("  Invalid input, using manual input...\n")
         
         # Get user inputs
-        video_path, num_exports, start_num, enable_pitch = get_user_inputs(use_editor_selection)
+        video_path, num_exports, start_num, enable_pitch, text_size, enable_color_mode, preset = get_user_inputs(use_editor_selection)
         
         initial_info = get_video_info(video_path)
         initial_size = initial_info['size'] / (1024 * 1024)
@@ -1280,16 +1420,19 @@ def main():
         print(f"  Exports: {num_exports}")
         print(f"  Starting Number: {start_num}")
         print(f"  Pitch Increase: {'YES' if enable_pitch else 'NO'}")
+        print(f"  Text Size: {text_size}")
+        print(f"  Color Mode: {'YES (hue +25)' if enable_color_mode else 'NO'}")
+        print(f"  Preset: {preset}")
         print(f"  Mode: {'MoviePy' if use_moviepy else 'FFmpeg'}")
         if enable_pitch and not use_moviepy:
             print(f"    Filter: rubberband=pitch={FIXED_PITCH_RATIO}:tempo=2.0")
             print(f"    Applied to each export (compounds naturally)")
         elif enable_pitch and use_moviepy:
-            print(f"    Note: MoviePy speedup naturally raises pitch")
+            print(f"    Note: MoviePy speedup will raise pitch naturally")
+        elif use_moviepy:
+            print(f"    Note: Audio pitch preserved using ffmpeg atempo/rubberband")
         if not use_moviepy:
             print(f"  Rubberband: {'Available' if has_rubberband else 'NOT available (fallback)'}")
-            print(f"  Preset: fast")
-        print(f"  Text Size: 111 (with 12% black background)")
         print(f"  Watermark Size: 60 (75% opacity)")
         print(f"  Processing: CUMULATIVE")
         
@@ -1330,7 +1473,10 @@ def main():
                         target_volume_db,
                         original_fps,
                         use_moviepy=True,
-                        silent=True
+                        silent=True,
+                        text_size=text_size,
+                        enable_color_mode=enable_color_mode,
+                        preset=preset
                     )
                     
                     if not success:
@@ -1377,6 +1523,8 @@ def main():
                 print(f"  Text: '{export_num} - {power_display}'")
                 print(f"  Pitch: {pitch_info}")
                 print(f"  Expected Speed: {2**(i+1)}x from original")
+                if enable_color_mode:
+                    print(f"  Color: Hue +25")
                 print(f"{'='*60}")
                 
                 success = process_video_cumulative(
@@ -1391,7 +1539,10 @@ def main():
                     target_volume_db,
                     original_fps,
                     use_moviepy=False,
-                    silent=False
+                    silent=False,
+                    text_size=text_size,
+                    enable_color_mode=enable_color_mode,
+                    preset=preset
                 )
                 
                 if not success:
@@ -1434,13 +1585,15 @@ def main():
             print(f"    Duration: {info['duration']:.2f}s")
             print(f"    Text: '{export_num} - {pow_display}'")
             print(f"    Speed: {speedup}x | Pitch: {pitch_display}")
+            if enable_color_mode:
+                print(f"    Color: Hue +25")
         
         print(f"\n{'='*60}")
         
         compile_input = input("\nCompile all exports into Video? (N/Y): ").strip().upper()
         
         if compile_input == 'Y':
-            compile_exports(exported_files, exports_dir, original_fps)
+            compile_exports(exported_files, exports_dir, original_fps, preset)
         else:
             print("Skipping compilation.")
         
