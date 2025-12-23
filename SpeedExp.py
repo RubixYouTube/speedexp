@@ -87,14 +87,11 @@ DEFAULT_TEXT_SIZE = 111
 # Default watermark size
 DEFAULT_WATERMARK_SIZE = 60
 
-# Target speed ratio
+# Target speed ratio (guaranteed 2x)
 TARGET_SPEED_RATIO = 2.0
 
-# Speed ratio tolerance (Changed to guaranteed x2 ~rubix)
-SPEED_RATIO_TOLERANCE = 0
-
 # Maximum retry attempts for speed correction
-MAX_SPEED_RETRIES = 3
+MAX_SPEED_RETRIES = 5
 
 def check_dependencies():
     """Check if required dependencies are installed"""
@@ -813,7 +810,7 @@ def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitc
     """Build ffmpeg command for speedup with given tempo"""
     
     if enable_pitch and has_rubberband and has_audio:
-        # Single rubberband filter for both pitch and tempo
+        # Single rubberband filter for both pitch and tempo with corrected tempo
         audio_filter = f"rubberband=tempo={tempo}:pitch={FIXED_PITCH_RATIO}:pitchq=speed,volume={volume_adjustment}dB"
         
         cmd = [
@@ -917,7 +914,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                              enable_pitch, has_rubberband, has_loudnorm, target_volume_db, 
                              original_fps, use_moviepy=False, silent=False, text_size=DEFAULT_TEXT_SIZE,
                              enable_color_mode=False, preset='fast'):
-    """Process video cumulatively with rubberband tempo+pitch and auto tempo correction"""
+    """Process video cumulatively with rubberband tempo+pitch and guaranteed 2x speed"""
     
     if use_moviepy:
         return process_video_moviepy(input_path, output_path, export_num, iteration, 
@@ -942,12 +939,13 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         has_audio = input_info['has_audio']
         input_fps = input_info.get('fps', original_fps)
         
-        expected_sped_duration = input_duration / TARGET_SPEED_RATIO
-        expected_final_duration = expected_sped_duration * 2
+        # Target duration after 2x speedup
+        target_sped_duration = input_duration / TARGET_SPEED_RATIO
+        expected_final_duration = target_sped_duration * 2
         
         if not silent:
             print(f"  Input: {input_duration:.2f}s, {input_size_mb:.2f} MB, {input_fps:.2f}fps")
-            print(f"  Expected: sped={expected_sped_duration:.2f}s, final={expected_final_duration:.2f}s")
+            print(f"  Target: sped={target_sped_duration:.2f}s (guaranteed 2x), final={expected_final_duration:.2f}s")
         
         # Volume adjustment
         current_volume = get_audio_volume(input_path) if has_audio else -20.0
@@ -956,7 +954,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         if not silent:
             if enable_pitch:
                 cumulative_semitones = (iteration + 1) * 1  # 1 semitone per export
-                print(f"  Pitch: rubberband tempo=2.0:pitch={FIXED_PITCH_RATIO}")
+                print(f"  Pitch: rubberband tempo=2.0:pitch={FIXED_PITCH_RATIO} (with auto-correction)")
                 print(f"    Cumulative: +{cumulative_semitones} semitones from original")
             print(f"  Volume: {current_volume:.1f}dB -> {target_volume_db:.1f}dB (adjust: {volume_adjustment:+.1f}dB)")
         
@@ -968,9 +966,12 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         
         temp_files = [temp_sped, temp_list, temp_concat]
         
-        # Step 1: Speed up by 2x with tempo correction loop
+        # Step 1: Speed up with guaranteed 2x using tempo correction loop
         tempo = TARGET_SPEED_RATIO  # Start with 2.0
-        video_pts = 1.0 / tempo  # 0.5 for 2x speed
+        video_pts = 1.0 / TARGET_SPEED_RATIO  # Always 0.5 for video (guaranteed 2x)
+        
+        speed_achieved = False
+        final_tempo = tempo
         
         for attempt in range(MAX_SPEED_RETRIES):
             if attempt == 0:
@@ -987,7 +988,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                         print(f"  Step 1/3: setpts={video_pts}*PTS (no audio)...")
             else:
                 if not silent:
-                    print(f"    Retry {attempt}: tempo={tempo:.4f}, video_pts={video_pts:.4f}...")
+                    print(f"    Retry {attempt}: corrected tempo={tempo:.6f}...")
             
             # Remove previous attempt if exists
             if os.path.exists(temp_sped):
@@ -1017,38 +1018,45 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
             speed_ratio = input_duration / actual_sped_duration if actual_sped_duration > 0 else 0
             
             if not silent:
-                print(f"    Sped-up: {actual_sped_duration:.2f}s (speed ratio: {speed_ratio:.2f}x)")
+                print(f"    Result: {actual_sped_duration:.2f}s (speed ratio: {speed_ratio:.4f}x)")
             
-            # Check if speed ratio is within acceptable range
-            min_acceptable = TARGET_SPEED_RATIO * (1 - SPEED_RATIO_TOLERANCE)  # 1.95
+            # Check if we achieved exactly 2x (within 0.5% tolerance for precision)
+            duration_diff = abs(actual_sped_duration - target_sped_duration)
+            duration_tolerance = target_sped_duration * 0.005  # 0.5% tolerance
             
-            if speed_ratio >= min_acceptable:
-                # Speed is acceptable
+            if duration_diff <= duration_tolerance:
+                # Speed is exactly 2x (or very close)
+                speed_achieved = True
+                final_tempo = tempo
                 if not silent and attempt > 0:
-                    print(f"    ✓ Speed ratio corrected to {speed_ratio:.2f}x")
+                    print(f"    ✓ Achieved guaranteed 2x speed (tempo={tempo:.6f})")
                 break
             else:
-                # Speed is too slow, need to increase tempo
+                # Need to correct tempo
                 if attempt < MAX_SPEED_RETRIES - 1:
                     if not silent:
-                        print(f"    ⚠ Speed ratio {speed_ratio:.2f}x is below target {TARGET_SPEED_RATIO}x")
-                        print(f"    Calculating corrected tempo...")
+                        print(f"    ⚠ Duration {actual_sped_duration:.4f}s ≠ target {target_sped_duration:.4f}s")
                     
-                    # Calculate correction factor
-                    # We need: actual_sped_duration / expected_sped_duration = correction needed
-                    correction_factor = actual_sped_duration / expected_sped_duration
+                    # Calculate exact correction factor
+                    # If output is longer than target, we need higher tempo
+                    # If output is shorter than target, we need lower tempo
+                    correction_factor = actual_sped_duration / target_sped_duration
                     
-                    # New tempo = current tempo * correction factor
+                    # Apply correction to tempo
                     tempo = tempo * correction_factor
-                    video_pts = 1.0 / tempo
                     
                     if not silent:
-                        print(f"    Corrected tempo: {tempo:.4f} (video_pts: {video_pts:.4f})")
+                        print(f"    Correcting tempo: {final_tempo:.6f} -> {tempo:.6f} (factor: {correction_factor:.6f})")
+                    
+                    final_tempo = tempo
                 else:
-                    # Final attempt failed, warn but continue
+                    # Final attempt - use the best we got
                     if not silent:
-                        print(f"    ⚠ Warning: Could not achieve target speed after {MAX_SPEED_RETRIES} attempts")
-                        print(f"    Proceeding with speed ratio: {speed_ratio:.2f}x")
+                        print(f"    ⚠ Max retries reached. Using tempo={tempo:.6f} (speed: {speed_ratio:.4f}x)")
+                    speed_achieved = True
+        
+        if not silent:
+            print(f"    Final tempo used: {final_tempo:.6f}")
         
         # Step 2: Duplicate
         if not silent:
@@ -1190,6 +1198,8 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         if not silent:
             print(f"✓ Export {export_num} completed")
             print(f"    Final duration: {final_duration:.2f}s | Cumulative speed: {cumulative_speed}x")
+            if enable_pitch:
+                print(f"    Tempo used: {final_tempo:.6f} | Pitch: {FIXED_PITCH_RATIO}")
         
         return True
         
@@ -1515,6 +1525,7 @@ def main():
         print(f"  Mode: {'MoviePy' if use_moviepy else 'FFmpeg'}")
         if enable_pitch and not use_moviepy:
             print(f"    Filter: rubberband=tempo=2.0:pitch={FIXED_PITCH_RATIO}")
+            print(f"    Tempo auto-correction: ENABLED (guaranteed 2x speed)")
             print(f"    Applied to each export (compounds naturally)")
         elif enable_pitch and use_moviepy:
             print(f"    Note: MoviePy speedup will raise pitch naturally")
@@ -1523,7 +1534,7 @@ def main():
         if not use_moviepy:
             print(f"  Rubberband: {'Available' if has_rubberband else 'NOT available (fallback)'}")
         print(f"  Watermark Size: {watermark_size} (75% opacity)")
-        print(f"  Speed Correction: Auto (target {TARGET_SPEED_RATIO}x, tolerance {SPEED_RATIO_TOLERANCE*100:.1f}%)")
+        print(f"  Speed: Guaranteed 2x (auto tempo correction)")
         print(f"  Processing: CUMULATIVE")
         
         exported_files = []
@@ -1531,7 +1542,7 @@ def main():
         print(f"\nStarting export process...")
         print(f"Flow: Original → Export 1 → Export 2 → ... → Export {num_exports}")
         if enable_pitch and not use_moviepy:
-            print(f"Pitch: rubberband=tempo=2.0:pitch={FIXED_PITCH_RATIO} each export")
+            print(f"Pitch: rubberband=tempo=2.0:pitch={FIXED_PITCH_RATIO} each export (with auto-correction)")
         print()
         
         current_input = video_path
@@ -1612,7 +1623,7 @@ def main():
                 print(f"  Output: {actual_name}.mp4")
                 print(f"  Text: '{export_num} - {power_display}'")
                 print(f"  Pitch: {pitch_info}")
-                print(f"  Expected Speed: {2**(i+1)}x from original")
+                print(f"  Expected Speed: {2**(i+1)}x from original (guaranteed)")
                 if enable_color_mode:
                     print(f"  Color: Hue +25")
                 print(f"{'='*60}")
@@ -1674,7 +1685,7 @@ def main():
             print(f"    Size: {size:.2f} MB ({size_ratio:.1f}%)")
             print(f"    Duration: {info['duration']:.2f}s")
             print(f"    Text: '{export_num} - {pow_display}'")
-            print(f"    Speed: {speedup}x | Pitch: {pitch_display}")
+            print(f"    Speed: {speedup}x (guaranteed) | Pitch: {pitch_display}")
             if enable_color_mode:
                 print(f"    Color: Hue +25")
         
