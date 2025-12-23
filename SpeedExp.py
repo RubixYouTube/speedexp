@@ -81,7 +81,7 @@ DEFAULT_TEXT_SIZE = 111
 # Default watermark size
 DEFAULT_WATERMARK_SIZE = 60
 
-# Maximum retry attempts for speed correction (increased for precision)
+# Maximum retry attempts for speed correction (only used in pitch mode)
 MAX_SPEED_RETRIES = 10
 
 def check_dependencies():
@@ -660,17 +660,17 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         video = moviepy.editor.VideoFileClip(input_path)
         has_audio = video.audio is not None
         
-        # Calculate speed factor to match original duration
-        input_duration = video.duration
-        target_sped_duration = original_video_duration / 2.0
-        speed_factor = input_duration / target_sped_duration
-        
         if enable_pitch:
+            # Pitch mode: Calculate speed factor to match original duration
+            input_duration = video.duration
+            target_sped_duration = original_video_duration / 2.0
+            speed_factor = input_duration / target_sped_duration
             sped_video = video.speedx(speed_factor)
         else:
+            # Non-pitch mode: Standard 2x speed
             if has_audio:
                 video_no_audio = video.without_audio()
-                sped_video_only = video_no_audio.speedx(speed_factor)
+                sped_video_only = video_no_audio.speedx(2)
                 
                 temp_audio_in = os.path.join(temp_dir, f"temp_audio_in_{export_num}_{os.getpid()}.aac")
                 temp_audio_out = os.path.join(temp_dir, f"temp_audio_out_{export_num}_{os.getpid()}.aac")
@@ -683,9 +683,9 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
                 subprocess.run(cmd_extract, capture_output=True)
                 
                 if has_rubberband:
-                    audio_filter = f"rubberband=tempo={speed_factor}"
+                    audio_filter = "rubberband=tempo=2.0"
                 else:
-                    audio_filter = f"atempo={speed_factor}"
+                    audio_filter = "atempo=2.0"
                 
                 cmd_audio = [
                     'ffmpeg', '-i', temp_audio_in,
@@ -700,7 +700,7 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
                 else:
                     sped_video = sped_video_only
             else:
-                sped_video = video.speedx(speed_factor)
+                sped_video = video.speedx(2)
         
         final_video = moviepy.editor.concatenate_videoclips([sped_video, sped_video])
         
@@ -811,27 +811,8 @@ def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitc
             '-shortest',
             '-y', output_path
         ]
-    elif has_rubberband and has_audio:
-        audio_filter = f"rubberband=tempo={tempo}:pitchq=speed,volume={volume_adjustment}dB"
-        
-        cmd = [
-            'ffmpeg', '-i', input_path,
-            '-filter_complex',
-            f'[0:v]setpts={video_pts}*PTS[v];[0:a]{audio_filter}[a]',
-            '-map', '[v]',
-            '-map', '[a]',
-            '-c:v', 'libx264',
-            '-preset', preset,
-            '-crf', '23',
-            '-pix_fmt', 'yuv420p',
-            '-r', str(original_fps),
-            '-c:a', 'aac',
-            '-b:a', '128k',
-            '-ar', '44100',
-            '-shortest',
-            '-y', output_path
-        ]
     elif enable_pitch and not has_rubberband and has_audio:
+        # Pitch mode fallback: atempo + asetrate
         pitched_rate = int(44100 * FIXED_PITCH_RATIO)
         audio_filter = f"atempo={tempo},asetrate={pitched_rate},aresample=44100,volume={volume_adjustment}dB"
         
@@ -852,7 +833,42 @@ def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitc
             '-shortest',
             '-y', output_path
         ]
+    elif enable_pitch and not has_audio:
+        # Pitch mode but no audio
+        cmd = [
+            'ffmpeg', '-i', input_path,
+            '-vf', f'setpts={video_pts}*PTS',
+            '-c:v', 'libx264',
+            '-preset', preset,
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-r', str(original_fps),
+            '-an',
+            '-y', output_path
+        ]
+    elif has_rubberband and has_audio:
+        # Non-pitch mode with rubberband
+        audio_filter = f"rubberband=tempo={tempo}:pitchq=speed,volume={volume_adjustment}dB"
+        
+        cmd = [
+            'ffmpeg', '-i', input_path,
+            '-filter_complex',
+            f'[0:v]setpts={video_pts}*PTS[v];[0:a]{audio_filter}[a]',
+            '-map', '[v]',
+            '-map', '[a]',
+            '-c:v', 'libx264',
+            '-preset', preset,
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-r', str(original_fps),
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            '-ar', '44100',
+            '-shortest',
+            '-y', output_path
+        ]
     elif has_audio:
+        # Non-pitch mode with atempo
         audio_filter = f"atempo={tempo},volume={volume_adjustment}dB"
         
         cmd = [
@@ -873,6 +889,7 @@ def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitc
             '-y', output_path
         ]
     else:
+        # No audio
         cmd = [
             'ffmpeg', '-i', input_path,
             '-vf', f'setpts={video_pts}*PTS',
@@ -891,7 +908,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                              enable_pitch, has_rubberband, has_loudnorm, target_volume_db, 
                              original_fps, original_video_duration, use_moviepy=False, silent=False, 
                              text_size=DEFAULT_TEXT_SIZE, enable_color_mode=False, preset='fast'):
-    """Process video cumulatively with perfect duration matching to original video"""
+    """Process video cumulatively - pitch mode uses duration correction, non-pitch uses standard 2x"""
     
     if use_moviepy:
         return process_video_moviepy(input_path, output_path, export_num, iteration, 
@@ -916,37 +933,9 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         has_audio = input_info['has_audio']
         input_fps = input_info.get('fps', original_fps)
         
-        # TARGET: After speedup, duration should be exactly half of ORIGINAL video
-        # After duplicate, duration should be exactly equal to ORIGINAL video
-        target_sped_duration = original_video_duration / 2.0
-        target_final_duration = original_video_duration
-        
-        if not silent:
-            print(f"  Original video duration: {original_video_duration:.6f}s (TARGET)")
-            print(f"  Current input duration: {input_duration:.6f}s")
-            print(f"  Target after speedup: {target_sped_duration:.6f}s")
-            print(f"  Target after duplicate: {target_final_duration:.6f}s")
-        
-        # Calculate required tempo and video_pts to achieve exact target
-        # tempo = input_duration / target_sped_duration
-        # video_pts = target_sped_duration / input_duration = 1 / tempo
-        initial_tempo = input_duration / target_sped_duration
-        initial_video_pts = target_sped_duration / input_duration
-        
-        if not silent:
-            print(f"  Calculated tempo: {initial_tempo:.6f}")
-            print(f"  Calculated video_pts: {initial_video_pts:.6f}")
-        
         # Volume adjustment
         current_volume = get_audio_volume(input_path) if has_audio else -20.0
         volume_adjustment = target_volume_db - current_volume
-        
-        if not silent:
-            if enable_pitch:
-                cumulative_semitones = (iteration + 1) * 1
-                print(f"  Pitch: rubberband tempo={initial_tempo:.6f}:pitch={FIXED_PITCH_RATIO}")
-                print(f"    Cumulative: +{cumulative_semitones} semitones from original")
-            print(f"  Volume: {current_volume:.1f}dB -> {target_volume_db:.1f}dB (adjust: {volume_adjustment:+.1f}dB)")
         
         # Temp file paths
         temp_dir = os.path.dirname(output_path)
@@ -956,44 +945,148 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         
         temp_files = [temp_sped, temp_list, temp_concat]
         
-        # Step 1: Speed up with perfect duration matching
-        tempo = initial_tempo
-        video_pts = initial_video_pts
-        
-        # Frame duration for precision reference
-        frame_duration = 1.0 / original_fps
-        
-        best_tempo = tempo
-        best_video_pts = video_pts
-        best_error = float('inf')
-        best_duration = 0
-        
-        if not silent:
-            print(f"  Step 1/3: Speedup with duration correction...")
-        
-        for attempt in range(MAX_SPEED_RETRIES):
-            if attempt == 0:
-                if not silent:
-                    if enable_pitch and has_rubberband and has_audio:
-                        print(f"    Attempt {attempt+1}: tempo={tempo:.6f}, pitch={FIXED_PITCH_RATIO}")
-                    elif has_rubberband and has_audio:
-                        print(f"    Attempt {attempt+1}: tempo={tempo:.6f} (no pitch)")
-                    elif has_audio:
-                        print(f"    Attempt {attempt+1}: tempo={tempo:.6f} (atempo)")
-                    else:
-                        print(f"    Attempt {attempt+1}: video_pts={video_pts:.6f} (no audio)")
-            else:
-                if not silent:
-                    print(f"    Attempt {attempt+1}: tempo={tempo:.6f}, video_pts={video_pts:.6f}")
+        if enable_pitch:
+            # ========== PITCH MODE: Duration correction to match original ==========
+            target_sped_duration = original_video_duration / 2.0
+            target_final_duration = original_video_duration
             
-            # Remove previous attempt
+            if not silent:
+                print(f"  Mode: PITCH (with duration correction)")
+                print(f"  Original video duration: {original_video_duration:.6f}s (TARGET)")
+                print(f"  Current input duration: {input_duration:.6f}s")
+                print(f"  Target after speedup: {target_sped_duration:.6f}s")
+                print(f"  Target after duplicate: {target_final_duration:.6f}s")
+            
+            # Calculate required tempo and video_pts
+            initial_tempo = input_duration / target_sped_duration
+            initial_video_pts = target_sped_duration / input_duration
+            
+            if not silent:
+                print(f"  Calculated tempo: {initial_tempo:.6f}")
+                print(f"  Calculated video_pts: {initial_video_pts:.6f}")
+                cumulative_semitones = (iteration + 1) * 1
+                print(f"  Pitch: rubberband tempo={initial_tempo:.6f}:pitch={FIXED_PITCH_RATIO}")
+                print(f"    Cumulative: +{cumulative_semitones} semitones from original")
+                print(f"  Volume: {current_volume:.1f}dB -> {target_volume_db:.1f}dB (adjust: {volume_adjustment:+.1f}dB)")
+            
+            tempo = initial_tempo
+            video_pts = initial_video_pts
+            
+            frame_duration = 1.0 / original_fps
+            
+            best_tempo = tempo
+            best_video_pts = video_pts
+            best_error = float('inf')
+            best_duration = 0
+            
+            if not silent:
+                print(f"  Step 1/3: Speedup with duration correction...")
+            
+            for attempt in range(MAX_SPEED_RETRIES):
+                if attempt == 0:
+                    if not silent:
+                        if has_rubberband and has_audio:
+                            print(f"    Attempt {attempt+1}: tempo={tempo:.6f}, pitch={FIXED_PITCH_RATIO}")
+                        elif has_audio:
+                            print(f"    Attempt {attempt+1}: tempo={tempo:.6f} (atempo fallback)")
+                        else:
+                            print(f"    Attempt {attempt+1}: video_pts={video_pts:.6f} (no audio)")
+                else:
+                    if not silent:
+                        print(f"    Attempt {attempt+1}: tempo={tempo:.6f}, video_pts={video_pts:.6f}")
+                
+                if os.path.exists(temp_sped):
+                    try:
+                        os.remove(temp_sped)
+                    except:
+                        pass
+                
+                cmd_speed = build_speedup_command(
+                    input_path, temp_sped, tempo, video_pts, enable_pitch,
+                    has_rubberband, has_audio, volume_adjustment, original_fps, preset
+                )
+                
+                result = subprocess.run(cmd_speed, capture_output=True, text=True)
+                if result.returncode != 0:
+                    if not silent:
+                        print(f"      ✗ FFmpeg error: {result.stderr[-200:]}")
+                    raise RuntimeError(f"Speed-up failed: {result.stderr[-300:]}")
+                
+                valid, msg = verify_output_file(temp_sped)
+                if not valid:
+                    raise RuntimeError(f"Speed-up invalid: {msg}")
+                
+                actual_sped_duration = get_precise_duration(temp_sped)
+                duration_error = abs(actual_sped_duration - target_sped_duration)
+                
+                if not silent:
+                    print(f"      Result: {actual_sped_duration:.6f}s (target: {target_sped_duration:.6f}s, error: {duration_error:.6f}s)")
+                
+                if duration_error < best_error:
+                    best_error = duration_error
+                    best_tempo = tempo
+                    best_video_pts = video_pts
+                    best_duration = actual_sped_duration
+                
+                precision_threshold = min(0.001, frame_duration / 2)
+                
+                if duration_error <= precision_threshold:
+                    if not silent:
+                        print(f"      ✓ Perfect match achieved! Error: {duration_error:.6f}s")
+                    break
+                
+                if attempt > 0 and duration_error >= best_error and attempt >= 3:
+                    if not silent:
+                        print(f"      ⚠ Not improving, using best result (error: {best_error:.6f}s)")
+                    if best_duration != actual_sped_duration:
+                        tempo = best_tempo
+                        video_pts = best_video_pts
+                        if os.path.exists(temp_sped):
+                            os.remove(temp_sped)
+                        cmd_speed = build_speedup_command(
+                            input_path, temp_sped, tempo, video_pts, enable_pitch,
+                            has_rubberband, has_audio, volume_adjustment, original_fps, preset
+                        )
+                        subprocess.run(cmd_speed, capture_output=True, text=True)
+                    break
+                
+                correction_factor = actual_sped_duration / target_sped_duration
+                
+                if not silent:
+                    print(f"      Correction factor: {correction_factor:.6f}")
+                
+                tempo = tempo * correction_factor
+                video_pts = 1.0 / tempo
+                
+                tempo = max(0.5, min(tempo, 100.0))
+                video_pts = max(0.01, min(video_pts, 2.0))
+            
+            final_sped_duration = get_precise_duration(temp_sped)
+            final_error = abs(final_sped_duration - target_sped_duration)
+            
+            if not silent:
+                print(f"    Final: {final_sped_duration:.6f}s (error: {final_error:.6f}s, tempo: {tempo:.6f})")
+        
+        else:
+            # ========== NON-PITCH MODE: Standard 2x speed, no correction ==========
+            tempo = 2.0
+            video_pts = 0.5
+            
+            if not silent:
+                print(f"  Mode: NON-PITCH (standard 2x speed)")
+                print(f"  Input duration: {input_duration:.6f}s")
+                print(f"  Expected after speedup: {input_duration / 2.0:.6f}s")
+                print(f"  Tempo: {tempo} (fixed)")
+                print(f"  Video PTS: {video_pts} (fixed)")
+                print(f"  Volume: {current_volume:.1f}dB -> {target_volume_db:.1f}dB (adjust: {volume_adjustment:+.1f}dB)")
+                print(f"  Step 1/3: Standard 2x speedup...")
+            
             if os.path.exists(temp_sped):
                 try:
                     os.remove(temp_sped)
                 except:
                     pass
             
-            # Build and run command
             cmd_speed = build_speedup_command(
                 input_path, temp_sped, tempo, video_pts, enable_pitch,
                 has_rubberband, has_audio, volume_adjustment, original_fps, preset
@@ -1001,76 +1094,17 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
             
             result = subprocess.run(cmd_speed, capture_output=True, text=True)
             if result.returncode != 0:
-                if not silent:
-                    print(f"      ✗ FFmpeg error: {result.stderr[-200:]}")
                 raise RuntimeError(f"Speed-up failed: {result.stderr[-300:]}")
             
             valid, msg = verify_output_file(temp_sped)
             if not valid:
                 raise RuntimeError(f"Speed-up invalid: {msg}")
             
-            # Get precise duration
             actual_sped_duration = get_precise_duration(temp_sped)
-            duration_error = abs(actual_sped_duration - target_sped_duration)
+            speed_ratio = input_duration / actual_sped_duration if actual_sped_duration > 0 else 0
             
             if not silent:
-                print(f"      Result: {actual_sped_duration:.6f}s (target: {target_sped_duration:.6f}s, error: {duration_error:.6f}s)")
-            
-            # Track best result
-            if duration_error < best_error:
-                best_error = duration_error
-                best_tempo = tempo
-                best_video_pts = video_pts
-                best_duration = actual_sped_duration
-            
-            # Check if we achieved perfect match (within 1ms or half a frame, whichever is smaller)
-            precision_threshold = min(0.001, frame_duration / 2)
-            
-            if duration_error <= precision_threshold:
-                if not silent:
-                    print(f"      ✓ Perfect match achieved! Error: {duration_error:.6f}s")
-                break
-            
-            # Check if we're not improving anymore
-            if attempt > 0 and duration_error >= best_error and attempt >= 3:
-                if not silent:
-                    print(f"      ⚠ Not improving, using best result (error: {best_error:.6f}s)")
-                # Use the best result
-                if best_duration != actual_sped_duration:
-                    # Re-run with best parameters
-                    tempo = best_tempo
-                    video_pts = best_video_pts
-                    if os.path.exists(temp_sped):
-                        os.remove(temp_sped)
-                    cmd_speed = build_speedup_command(
-                        input_path, temp_sped, tempo, video_pts, enable_pitch,
-                        has_rubberband, has_audio, volume_adjustment, original_fps, preset
-                    )
-                    subprocess.run(cmd_speed, capture_output=True, text=True)
-                break
-            
-            # Calculate correction
-            # If actual is longer than target, we need higher tempo
-            # If actual is shorter than target, we need lower tempo
-            correction_factor = actual_sped_duration / target_sped_duration
-            
-            if not silent:
-                print(f"      Correction factor: {correction_factor:.6f}")
-            
-            # Apply correction
-            tempo = tempo * correction_factor
-            video_pts = 1.0 / tempo
-            
-            # Clamp to reasonable values
-            tempo = max(0.5, min(tempo, 100.0))
-            video_pts = max(0.01, min(video_pts, 2.0))
-        
-        # Final verification
-        final_sped_duration = get_precise_duration(temp_sped)
-        final_error = abs(final_sped_duration - target_sped_duration)
-        
-        if not silent:
-            print(f"    Final: {final_sped_duration:.6f}s (error: {final_error:.6f}s, tempo: {tempo:.6f})")
+                print(f"    Result: {actual_sped_duration:.6f}s (speed ratio: {speed_ratio:.2f}x)")
         
         # Step 2: Duplicate
         if not silent:
@@ -1099,10 +1133,13 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
             raise RuntimeError(f"Concat invalid: {msg}")
         
         concat_duration = get_precise_duration(temp_concat)
-        concat_error = abs(concat_duration - target_final_duration)
         
         if not silent:
-            print(f"    Concatenated: {concat_duration:.6f}s (target: {target_final_duration:.6f}s, error: {concat_error:.6f}s)")
+            if enable_pitch:
+                concat_error = abs(concat_duration - original_video_duration)
+                print(f"    Concatenated: {concat_duration:.6f}s (target: {original_video_duration:.6f}s, error: {concat_error:.6f}s)")
+            else:
+                print(f"    Concatenated: {concat_duration:.6f}s")
         
         # Step 3: Add text overlay
         if not silent:
@@ -1207,19 +1244,18 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         if not success:
             raise RuntimeError(f"All codecs failed: {last_error}")
         
-        # Final verification
         final_duration = get_precise_duration(output_path)
-        final_error_to_original = abs(final_duration - original_video_duration)
         cumulative_speed = 2 ** (iteration + 1)
         
         if not silent:
             print(f"✓ Export {export_num} completed")
             print(f"    Final duration: {final_duration:.6f}s")
-            print(f"    Original duration: {original_video_duration:.6f}s")
-            print(f"    Duration error: {final_error_to_original:.6f}s")
-            print(f"    Cumulative speed: {cumulative_speed}x")
             if enable_pitch:
+                final_error_to_original = abs(final_duration - original_video_duration)
+                print(f"    Original duration: {original_video_duration:.6f}s")
+                print(f"    Duration error: {final_error_to_original:.6f}s")
                 print(f"    Final tempo used: {tempo:.6f}")
+            print(f"    Cumulative speed: {cumulative_speed}x")
         
         return True
         
@@ -1510,7 +1546,7 @@ def main():
         
         initial_info = get_video_info(video_path)
         initial_size = initial_info['size'] / (1024 * 1024)
-        original_video_duration = get_precise_duration(video_path)  # STORE ORIGINAL DURATION
+        original_video_duration = get_precise_duration(video_path)
         original_fps = initial_info.get('fps', 30.0)
         
         target_volume_db = get_audio_volume(video_path) if initial_info.get('has_audio') else -20.0
@@ -1519,7 +1555,7 @@ def main():
         print(f"  Video: {video_path}")
         print(f"  Codec: {initial_info.get('video_codec', 'unknown')}")
         print(f"  Size: {initial_size:.2f} MB")
-        print(f"  Duration: {original_video_duration:.6f}s (LOCKED TARGET)")
+        print(f"  Duration: {original_video_duration:.6f}s")
         print(f"  Frame Rate: {original_fps:.2f} fps (locked)")
         print(f"  Resolution: {initial_info.get('width', 0)}x{initial_info.get('height', 0)}")
         print(f"  Has Audio: {initial_info.get('has_audio', False)}")
@@ -1531,23 +1567,27 @@ def main():
         print(f"  Color Mode: {'YES (hue +25)' if enable_color_mode else 'NO'}")
         print(f"  Preset: {preset}")
         print(f"  Mode: {'MoviePy' if use_moviepy else 'FFmpeg'}")
-        if enable_pitch and not use_moviepy:
+        
+        if enable_pitch:
             print(f"    Filter: rubberband=tempo=X:pitch={FIXED_PITCH_RATIO}")
-            print(f"    Tempo auto-correction: ENABLED (perfect duration match)")
-            print(f"    All exports will match original duration: {original_video_duration:.6f}s")
-        elif enable_pitch and use_moviepy:
-            print(f"    Note: MoviePy speedup with duration matching")
+            print(f"    Duration correction: ENABLED (perfect match to original)")
+            print(f"    Target duration: {original_video_duration:.6f}s")
+        else:
+            print(f"    Speed: Standard 2x (no duration correction)")
+        
         if not use_moviepy:
             print(f"  Rubberband: {'Available' if has_rubberband else 'NOT available (fallback)'}")
         print(f"  Watermark Size: {watermark_size} (75% opacity)")
-        print(f"  Duration Matching: PERFECT (no tolerance)")
         print(f"  Processing: CUMULATIVE")
         
         exported_files = []
         
         print(f"\nStarting export process...")
         print(f"Flow: Original → Export 1 → Export 2 → ... → Export {num_exports}")
-        print(f"Each export will be corrected to match original duration: {original_video_duration:.6f}s")
+        if enable_pitch:
+            print(f"Pitch mode: Each export corrected to match original duration: {original_video_duration:.6f}s")
+        else:
+            print(f"Non-pitch mode: Standard 2x speed per iteration")
         print()
         
         current_input = video_path
@@ -1577,7 +1617,7 @@ def main():
                         has_loudnorm,
                         target_volume_db,
                         original_fps,
-                        original_video_duration,  # Pass original duration
+                        original_video_duration,
                         use_moviepy=True,
                         silent=True,
                         text_size=text_size,
@@ -1622,7 +1662,8 @@ def main():
                 print(f"  Output: {actual_name}.mp4")
                 print(f"  Text: '{export_num} - {power_display}'")
                 print(f"  Pitch: {pitch_info}")
-                print(f"  Target Duration: {original_video_duration:.6f}s (original)")
+                if enable_pitch:
+                    print(f"  Target Duration: {original_video_duration:.6f}s (original)")
                 print(f"  Expected Speed: {2**(i+1)}x from original")
                 if enable_color_mode:
                     print(f"  Color: Hue +25")
@@ -1639,7 +1680,7 @@ def main():
                     has_loudnorm,
                     target_volume_db,
                     original_fps,
-                    original_video_duration,  # Pass original duration
+                    original_video_duration,
                     use_moviepy=False,
                     silent=False,
                     text_size=text_size,
@@ -1656,12 +1697,14 @@ def main():
                 speedup = 2 ** (i + 1)
                 size_percent = (output_size / initial_size) * 100
                 
-                # Verify duration matches
                 export_duration = get_precise_duration(output_path)
-                duration_error = abs(export_duration - original_video_duration)
                 
                 print(f"  Size: {output_size:.2f} MB ({size_percent:.1f}%)")
-                print(f"  Duration Match: {export_duration:.6f}s (error: {duration_error:.6f}s)")
+                if enable_pitch:
+                    duration_error = abs(export_duration - original_video_duration)
+                    print(f"  Duration Match: {export_duration:.6f}s (error: {duration_error:.6f}s)")
+                else:
+                    print(f"  Duration: {export_duration:.2f}s")
                 
                 current_input = output_path
         
@@ -1669,7 +1712,8 @@ def main():
         print(f"✓ ALL {num_exports} EXPORTS COMPLETED!")
         print(f"{'='*60}")
         print(f"Location: {os.path.abspath(exports_dir)}")
-        print(f"Target Duration: {original_video_duration:.6f}s")
+        if enable_pitch:
+            print(f"Target Duration: {original_video_duration:.6f}s")
         print(f"\nExport Summary:")
         print(f"{'='*60}")
         
@@ -1677,7 +1721,6 @@ def main():
             export_num = start_num + i
             size = check_file_size(export_file)
             export_duration = get_precise_duration(export_file)
-            duration_error = abs(export_duration - original_video_duration)
             pow_val = 2 ** export_num
             pow_display = format_power_notation(pow_val)
             speedup = 2 ** (i + 1)
@@ -1686,12 +1729,16 @@ def main():
             if enable_pitch:
                 cumulative_semitones = (i + 1) * 1
                 pitch_display = f"+{cumulative_semitones}st"
+                duration_error = abs(export_duration - original_video_duration)
             else:
                 pitch_display = "None"
             
             print(f"\n  {os.path.basename(export_file)}:")
             print(f"    Size: {size:.2f} MB ({size_ratio:.1f}%)")
-            print(f"    Duration: {export_duration:.6f}s (error: {duration_error:.6f}s)")
+            if enable_pitch:
+                print(f"    Duration: {export_duration:.6f}s (error: {duration_error:.6f}s)")
+            else:
+                print(f"    Duration: {export_duration:.2f}s")
             print(f"    Text: '{export_num} - {pow_display}'")
             print(f"    Speed: {speedup}x | Pitch: {pitch_display}")
             if enable_color_mode:
