@@ -87,6 +87,15 @@ DEFAULT_TEXT_SIZE = 111
 # Default watermark size
 DEFAULT_WATERMARK_SIZE = 60
 
+# Target speed ratio
+TARGET_SPEED_RATIO = 2.0
+
+# Speed ratio tolerance (Changed to guaranteed x2 ~rubix)
+SPEED_RATIO_TOLERANCE = 0
+
+# Maximum retry attempts for speed correction
+MAX_SPEED_RETRIES = 3
+
 def check_dependencies():
     """Check if required dependencies are installed"""
     if not shutil.which('ffmpeg'):
@@ -509,8 +518,6 @@ def get_user_inputs(use_editor_selection=False):
                 watermark_size = DEFAULT_WATERMARK_SIZE
         else:
             # Has letter or is empty - don't change
-            if watermark_size_input and any(c.isalpha() for c in watermark_size_input):
-                pass  # Silently use default since it has letters
             watermark_size = DEFAULT_WATERMARK_SIZE
         
         # Color mode input
@@ -801,11 +808,116 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
                 except:
                     pass
 
+def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitch, 
+                          has_rubberband, has_audio, volume_adjustment, original_fps, preset):
+    """Build ffmpeg command for speedup with given tempo"""
+    
+    if enable_pitch and has_rubberband and has_audio:
+        # Single rubberband filter for both pitch and tempo
+        audio_filter = f"rubberband=tempo={tempo}:pitch={FIXED_PITCH_RATIO}:pitchq=speed,volume={volume_adjustment}dB"
+        
+        cmd = [
+            'ffmpeg', '-i', input_path,
+            '-filter_complex',
+            f'[0:v]setpts={video_pts}*PTS[v];[0:a]{audio_filter}[a]',
+            '-map', '[v]',
+            '-map', '[a]',
+            '-c:v', 'libx264',
+            '-preset', preset,
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-r', str(original_fps),
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            '-ar', '44100',
+            '-shortest',
+            '-y', output_path
+        ]
+    elif has_rubberband and has_audio:
+        # No pitch, just tempo with rubberband
+        audio_filter = f"rubberband=tempo={tempo}:pitchq=speed,volume={volume_adjustment}dB"
+        
+        cmd = [
+            'ffmpeg', '-i', input_path,
+            '-filter_complex',
+            f'[0:v]setpts={video_pts}*PTS[v];[0:a]{audio_filter}[a]',
+            '-map', '[v]',
+            '-map', '[a]',
+            '-c:v', 'libx264',
+            '-preset', preset,
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-r', str(original_fps),
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            '-ar', '44100',
+            '-shortest',
+            '-y', output_path
+        ]
+    elif enable_pitch and not has_rubberband and has_audio:
+        # Fallback: atempo + asetrate for pitch
+        pitched_rate = int(44100 * FIXED_PITCH_RATIO)
+        audio_filter = f"atempo={tempo},asetrate={pitched_rate},aresample=44100,volume={volume_adjustment}dB"
+        
+        cmd = [
+            'ffmpeg', '-i', input_path,
+            '-filter_complex',
+            f'[0:v]setpts={video_pts}*PTS[v];[0:a]{audio_filter}[a]',
+            '-map', '[v]',
+            '-map', '[a]',
+            '-c:v', 'libx264',
+            '-preset', preset,
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-r', str(original_fps),
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            '-ar', '44100',
+            '-shortest',
+            '-y', output_path
+        ]
+    elif has_audio:
+        # No rubberband, no pitch - just atempo
+        audio_filter = f"atempo={tempo},volume={volume_adjustment}dB"
+        
+        cmd = [
+            'ffmpeg', '-i', input_path,
+            '-filter_complex',
+            f'[0:v]setpts={video_pts}*PTS[v];[0:a]{audio_filter}[a]',
+            '-map', '[v]',
+            '-map', '[a]',
+            '-c:v', 'libx264',
+            '-preset', preset,
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-r', str(original_fps),
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            '-ar', '44100',
+            '-shortest',
+            '-y', output_path
+        ]
+    else:
+        # No audio
+        cmd = [
+            'ffmpeg', '-i', input_path,
+            '-vf', f'setpts={video_pts}*PTS',
+            '-c:v', 'libx264',
+            '-preset', preset,
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-r', str(original_fps),
+            '-an',
+            '-y', output_path
+        ]
+    
+    return cmd
+
 def process_video_cumulative(input_path, output_path, export_num, iteration, reference_size_mb, 
                              enable_pitch, has_rubberband, has_loudnorm, target_volume_db, 
                              original_fps, use_moviepy=False, silent=False, text_size=DEFAULT_TEXT_SIZE,
                              enable_color_mode=False, preset='fast'):
-    """Process video cumulatively with rubberband tempo+pitch"""
+    """Process video cumulatively with rubberband tempo+pitch and auto tempo correction"""
     
     if use_moviepy:
         return process_video_moviepy(input_path, output_path, export_num, iteration, 
@@ -830,7 +942,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         has_audio = input_info['has_audio']
         input_fps = input_info.get('fps', original_fps)
         
-        expected_sped_duration = input_duration / 2
+        expected_sped_duration = input_duration / TARGET_SPEED_RATIO
         expected_final_duration = expected_sped_duration * 2
         
         if not silent:
@@ -856,138 +968,87 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         
         temp_files = [temp_sped, temp_list, temp_concat]
         
-        # Step 1: Speed up by 2x with pitch using single rubberband filter
-        if enable_pitch and has_rubberband and has_audio:
-            if not silent:
-                print(f"  Step 1/3: rubberband tempo=2.0:pitch={FIXED_PITCH_RATIO}...")
-            
-            # Single rubberband filter for both pitch and tempo
-            audio_filter = f"rubberband=tempo=2.0:pitch={FIXED_PITCH_RATIO}:pitchq=speed,volume={volume_adjustment}dB"
-            
-            cmd_speed = [
-                'ffmpeg', '-i', input_path,
-                '-filter_complex',
-                f'[0:v]setpts=0.5*PTS[v];[0:a]{audio_filter}[a]',
-                '-map', '[v]',
-                '-map', '[a]',
-                '-c:v', 'libx264',
-                '-preset', preset,
-                '-crf', '23',
-                '-pix_fmt', 'yuv420p',
-                '-r', str(original_fps),
-                '-c:a', 'aac',
-                '-b:a', '128k',
-                '-ar', '44100',
-                '-shortest',
-                '-y', temp_sped
-            ]
-        elif has_rubberband and has_audio:
-            # No pitch, just tempo with rubberband
-            if not silent:
-                print(f"  Step 1/3: rubberband tempo=2.0 (no pitch)...")
-            
-            audio_filter = f"rubberband=tempo=2.0:pitchq=speed,volume={volume_adjustment}dB"
-            
-            cmd_speed = [
-                'ffmpeg', '-i', input_path,
-                '-filter_complex',
-                f'[0:v]setpts=0.5*PTS[v];[0:a]{audio_filter}[a]',
-                '-map', '[v]',
-                '-map', '[a]',
-                '-c:v', 'libx264',
-                '-preset', preset,
-                '-crf', '23',
-                '-pix_fmt', 'yuv420p',
-                '-r', str(original_fps),
-                '-c:a', 'aac',
-                '-b:a', '128k',
-                '-ar', '44100',
-                '-shortest',
-                '-y', temp_sped
-            ]
-        elif enable_pitch and not has_rubberband and has_audio:
-            # Fallback: atempo + asetrate for pitch
-            if not silent:
-                print(f"  Step 1/3: atempo=2.0 + asetrate pitch (fallback)...")
-            
-            pitched_rate = int(44100 * FIXED_PITCH_RATIO)
-            audio_filter = f"atempo=2.0,asetrate={pitched_rate},aresample=44100,volume={volume_adjustment}dB"
-            
-            cmd_speed = [
-                'ffmpeg', '-i', input_path,
-                '-filter_complex',
-                f'[0:v]setpts=0.5*PTS[v];[0:a]{audio_filter}[a]',
-                '-map', '[v]',
-                '-map', '[a]',
-                '-c:v', 'libx264',
-                '-preset', preset,
-                '-crf', '23',
-                '-pix_fmt', 'yuv420p',
-                '-r', str(original_fps),
-                '-c:a', 'aac',
-                '-b:a', '128k',
-                '-ar', '44100',
-                '-shortest',
-                '-y', temp_sped
-            ]
-        elif has_audio:
-            # No rubberband, no pitch - just atempo
-            if not silent:
-                print(f"  Step 1/3: atempo=2.0 (no pitch, no rubberband)...")
-            
-            audio_filter = f"atempo=2.0,volume={volume_adjustment}dB"
-            
-            cmd_speed = [
-                'ffmpeg', '-i', input_path,
-                '-filter_complex',
-                f'[0:v]setpts=0.5*PTS[v];[0:a]{audio_filter}[a]',
-                '-map', '[v]',
-                '-map', '[a]',
-                '-c:v', 'libx264',
-                '-preset', preset,
-                '-crf', '23',
-                '-pix_fmt', 'yuv420p',
-                '-r', str(original_fps),
-                '-c:a', 'aac',
-                '-b:a', '128k',
-                '-ar', '44100',
-                '-shortest',
-                '-y', temp_sped
-            ]
-        else:
-            # No audio
-            if not silent:
-                print(f"  Step 1/3: setpts=0.5*PTS (no audio)...")
-            
-            cmd_speed = [
-                'ffmpeg', '-i', input_path,
-                '-vf', 'setpts=0.5*PTS',
-                '-c:v', 'libx264',
-                '-preset', preset,
-                '-crf', '23',
-                '-pix_fmt', 'yuv420p',
-                '-r', str(original_fps),
-                '-an',
-                '-y', temp_sped
-            ]
+        # Step 1: Speed up by 2x with tempo correction loop
+        tempo = TARGET_SPEED_RATIO  # Start with 2.0
+        video_pts = 1.0 / tempo  # 0.5 for 2x speed
         
-        result = subprocess.run(cmd_speed, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"Speed-up failed: {result.stderr[-300:]}")
-        
-        valid, msg = verify_output_file(temp_sped)
-        if not valid:
-            raise RuntimeError(f"Speed-up invalid: {msg}")
-        
-        sped_info = get_video_info(temp_sped)
-        actual_sped_duration = sped_info['duration']
-        
-        speed_ratio = input_duration / actual_sped_duration if actual_sped_duration > 0 else 0
-        if not silent:
-            print(f"    Sped-up: {actual_sped_duration:.2f}s (speed ratio: {speed_ratio:.2f}x)")
-        
-            if speed_ratio < 1.5:
-                print(f"    ⚠ Warning: Speed ratio lower than expected!")
+        for attempt in range(MAX_SPEED_RETRIES):
+            if attempt == 0:
+                if not silent:
+                    if enable_pitch and has_rubberband and has_audio:
+                        print(f"  Step 1/3: rubberband tempo={tempo}:pitch={FIXED_PITCH_RATIO}...")
+                    elif has_rubberband and has_audio:
+                        print(f"  Step 1/3: rubberband tempo={tempo} (no pitch)...")
+                    elif enable_pitch and not has_rubberband and has_audio:
+                        print(f"  Step 1/3: atempo={tempo} + asetrate pitch (fallback)...")
+                    elif has_audio:
+                        print(f"  Step 1/3: atempo={tempo} (no pitch, no rubberband)...")
+                    else:
+                        print(f"  Step 1/3: setpts={video_pts}*PTS (no audio)...")
+            else:
+                if not silent:
+                    print(f"    Retry {attempt}: tempo={tempo:.4f}, video_pts={video_pts:.4f}...")
+            
+            # Remove previous attempt if exists
+            if os.path.exists(temp_sped):
+                try:
+                    os.remove(temp_sped)
+                except:
+                    pass
+            
+            # Build and run command
+            cmd_speed = build_speedup_command(
+                input_path, temp_sped, tempo, video_pts, enable_pitch,
+                has_rubberband, has_audio, volume_adjustment, original_fps, preset
+            )
+            
+            result = subprocess.run(cmd_speed, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(f"Speed-up failed: {result.stderr[-300:]}")
+            
+            valid, msg = verify_output_file(temp_sped)
+            if not valid:
+                raise RuntimeError(f"Speed-up invalid: {msg}")
+            
+            # Check the actual speed ratio
+            sped_info = get_video_info(temp_sped)
+            actual_sped_duration = sped_info['duration']
+            
+            speed_ratio = input_duration / actual_sped_duration if actual_sped_duration > 0 else 0
+            
+            if not silent:
+                print(f"    Sped-up: {actual_sped_duration:.2f}s (speed ratio: {speed_ratio:.2f}x)")
+            
+            # Check if speed ratio is within acceptable range
+            min_acceptable = TARGET_SPEED_RATIO * (1 - SPEED_RATIO_TOLERANCE)  # 1.95
+            
+            if speed_ratio >= min_acceptable:
+                # Speed is acceptable
+                if not silent and attempt > 0:
+                    print(f"    ✓ Speed ratio corrected to {speed_ratio:.2f}x")
+                break
+            else:
+                # Speed is too slow, need to increase tempo
+                if attempt < MAX_SPEED_RETRIES - 1:
+                    if not silent:
+                        print(f"    ⚠ Speed ratio {speed_ratio:.2f}x is below target {TARGET_SPEED_RATIO}x")
+                        print(f"    Calculating corrected tempo...")
+                    
+                    # Calculate correction factor
+                    # We need: actual_sped_duration / expected_sped_duration = correction needed
+                    correction_factor = actual_sped_duration / expected_sped_duration
+                    
+                    # New tempo = current tempo * correction factor
+                    tempo = tempo * correction_factor
+                    video_pts = 1.0 / tempo
+                    
+                    if not silent:
+                        print(f"    Corrected tempo: {tempo:.4f} (video_pts: {video_pts:.4f})")
+                else:
+                    # Final attempt failed, warn but continue
+                    if not silent:
+                        print(f"    ⚠ Warning: Could not achieve target speed after {MAX_SPEED_RETRIES} attempts")
+                        print(f"    Proceeding with speed ratio: {speed_ratio:.2f}x")
         
         # Step 2: Duplicate
         if not silent:
@@ -1462,6 +1523,7 @@ def main():
         if not use_moviepy:
             print(f"  Rubberband: {'Available' if has_rubberband else 'NOT available (fallback)'}")
         print(f"  Watermark Size: {watermark_size} (75% opacity)")
+        print(f"  Speed Correction: Auto (target {TARGET_SPEED_RATIO}x, tolerance {SPEED_RATIO_TOLERANCE*100:.1f}%)")
         print(f"  Processing: CUMULATIVE")
         
         exported_files = []
