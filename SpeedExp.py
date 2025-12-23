@@ -84,6 +84,9 @@ FIXED_PITCH_RATIO = 1.059463094352953
 # Default text size
 DEFAULT_TEXT_SIZE = 111
 
+# Default watermark size
+DEFAULT_WATERMARK_SIZE = 60
+
 def check_dependencies():
     """Check if required dependencies are installed"""
     if not shutil.which('ffmpeg'):
@@ -497,6 +500,19 @@ def get_user_inputs(use_editor_selection=False):
                 print("  Error!: invalid size.")
                 text_size = DEFAULT_TEXT_SIZE
         
+        # Watermark size input
+        watermark_size_input = input("Resize watermark to?: ").strip()
+        if watermark_size_input and watermark_size_input.isdigit():
+            watermark_size = int(watermark_size_input)
+            if watermark_size <= 0:
+                print("  Error!: invalid watermark size.")
+                watermark_size = DEFAULT_WATERMARK_SIZE
+        else:
+            # Has letter or is empty - don't change
+            if watermark_size_input and any(c.isalpha() for c in watermark_size_input):
+                pass  # Silently use default since it has letters
+            watermark_size = DEFAULT_WATERMARK_SIZE
+        
         # Color mode input
         color_mode_input = input("Use Color Mode (N/Y)?: ").strip().upper()
         if color_mode_input not in ['N', 'Y']:
@@ -519,7 +535,7 @@ def get_user_inputs(use_editor_selection=False):
             print("  Invalid input, defaulting to fast")
             preset = 'fast'
         
-        return video_path, num_exports, start_num, enable_pitch, text_size, enable_color_mode, preset
+        return video_path, num_exports, start_num, enable_pitch, text_size, enable_color_mode, preset, watermark_size
         
     except Exception as e:
         raise e
@@ -789,7 +805,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                              enable_pitch, has_rubberband, has_loudnorm, target_volume_db, 
                              original_fps, use_moviepy=False, silent=False, text_size=DEFAULT_TEXT_SIZE,
                              enable_color_mode=False, preset='fast'):
-    """Process video cumulatively with rubberband pitch+tempo"""
+    """Process video cumulatively with rubberband tempo+pitch"""
     
     if use_moviepy:
         return process_video_moviepy(input_path, output_path, export_num, iteration, 
@@ -828,7 +844,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         if not silent:
             if enable_pitch:
                 cumulative_semitones = (iteration + 1) * 1  # 1 semitone per export
-                print(f"  Pitch: rubberband pitch={FIXED_PITCH_RATIO}:tempo=2.0")
+                print(f"  Pitch: rubberband tempo=2.0:pitch={FIXED_PITCH_RATIO}")
                 print(f"    Cumulative: +{cumulative_semitones} semitones from original")
             print(f"  Volume: {current_volume:.1f}dB -> {target_volume_db:.1f}dB (adjust: {volume_adjustment:+.1f}dB)")
         
@@ -843,10 +859,10 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         # Step 1: Speed up by 2x with pitch using single rubberband filter
         if enable_pitch and has_rubberband and has_audio:
             if not silent:
-                print(f"  Step 1/3: rubberband pitch={FIXED_PITCH_RATIO}:tempo=2.0...")
+                print(f"  Step 1/3: rubberband tempo=2.0:pitch={FIXED_PITCH_RATIO}...")
             
             # Single rubberband filter for both pitch and tempo
-            audio_filter = f"rubberband=pitch={FIXED_PITCH_RATIO}:tempo=2.0:pitchq=speed,volume={volume_adjustment}dB"
+            audio_filter = f"rubberband=tempo=2.0:pitch={FIXED_PITCH_RATIO}:pitchq=speed,volume={volume_adjustment}dB"
             
             cmd_speed = [
                 'ffmpeg', '-i', input_path,
@@ -1127,7 +1143,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                 except:
                     pass
 
-def compile_exports(export_files, exports_dir, original_fps, preset='fast'):
+def compile_exports(export_files, exports_dir, original_fps, preset='fast', watermark_size=DEFAULT_WATERMARK_SIZE):
     """Compile all exports into single video with watermark"""
     try:
         print(f"\n{'='*60}")
@@ -1138,6 +1154,7 @@ def compile_exports(export_files, exports_dir, original_fps, preset='fast'):
         
         print(f"  Output: {output_name}.mp4")
         print(f"  Merging {len(export_files)} exports...")
+        print(f"  Watermark size: {watermark_size}")
         
         temp_list = os.path.join(exports_dir, f"temp_compile_list_{os.getpid()}.txt")
         
@@ -1178,7 +1195,7 @@ def compile_exports(export_files, exports_dir, original_fps, preset='fast'):
             f"drawtext=text='{watermark_text}':"
             f"fontcolor=white@0.75:"
             f"bordercolor=black@0.75:borderw=2:"
-            f"fontsize=60:"
+            f"fontsize={watermark_size}:"
             f"box=1:boxcolor=orange@0.75:boxborderw=5:"
             f"x=w-tw-20:y=20"
         )
@@ -1300,6 +1317,17 @@ def compile_existing_exports_mode(exports_dir, preset='fast'):
     
     print(f"\n  Detected FPS: {original_fps:.2f}")
     
+    # Watermark size input for compile existing mode
+    watermark_size_input = input("\nResize watermark to?: ").strip()
+    if watermark_size_input and watermark_size_input.isdigit():
+        watermark_size = int(watermark_size_input)
+        if watermark_size <= 0:
+            print("  Error!: invalid watermark size.")
+            watermark_size = DEFAULT_WATERMARK_SIZE
+    else:
+        # Has letter or is empty - don't change
+        watermark_size = DEFAULT_WATERMARK_SIZE
+    
     confirm = input("\nProceed with compilation? (N/Y): ").strip().upper()
     
     if confirm != 'Y':
@@ -1309,7 +1337,7 @@ def compile_existing_exports_mode(exports_dir, preset='fast'):
     # Extract just the file paths for compile_exports
     export_file_paths = [f[2] for f in existing_exports]
     
-    compile_exports(export_file_paths, exports_dir, original_fps, preset)
+    compile_exports(export_file_paths, exports_dir, original_fps, preset, watermark_size)
     
     return True
 
@@ -1399,7 +1427,7 @@ def main():
             print("  Invalid input, using manual input...\n")
         
         # Get user inputs
-        video_path, num_exports, start_num, enable_pitch, text_size, enable_color_mode, preset = get_user_inputs(use_editor_selection)
+        video_path, num_exports, start_num, enable_pitch, text_size, enable_color_mode, preset, watermark_size = get_user_inputs(use_editor_selection)
         
         initial_info = get_video_info(video_path)
         initial_size = initial_info['size'] / (1024 * 1024)
@@ -1425,7 +1453,7 @@ def main():
         print(f"  Preset: {preset}")
         print(f"  Mode: {'MoviePy' if use_moviepy else 'FFmpeg'}")
         if enable_pitch and not use_moviepy:
-            print(f"    Filter: rubberband=pitch={FIXED_PITCH_RATIO}:tempo=2.0")
+            print(f"    Filter: rubberband=tempo=2.0:pitch={FIXED_PITCH_RATIO}")
             print(f"    Applied to each export (compounds naturally)")
         elif enable_pitch and use_moviepy:
             print(f"    Note: MoviePy speedup will raise pitch naturally")
@@ -1433,7 +1461,7 @@ def main():
             print(f"    Note: Audio pitch preserved using ffmpeg atempo/rubberband")
         if not use_moviepy:
             print(f"  Rubberband: {'Available' if has_rubberband else 'NOT available (fallback)'}")
-        print(f"  Watermark Size: 60 (75% opacity)")
+        print(f"  Watermark Size: {watermark_size} (75% opacity)")
         print(f"  Processing: CUMULATIVE")
         
         exported_files = []
@@ -1441,7 +1469,7 @@ def main():
         print(f"\nStarting export process...")
         print(f"Flow: Original → Export 1 → Export 2 → ... → Export {num_exports}")
         if enable_pitch and not use_moviepy:
-            print(f"Pitch: rubberband=pitch={FIXED_PITCH_RATIO}:tempo=2.0 each export")
+            print(f"Pitch: rubberband=tempo=2.0:pitch={FIXED_PITCH_RATIO} each export")
         print()
         
         current_input = video_path
@@ -1593,7 +1621,7 @@ def main():
         compile_input = input("\nCompile all exports into Video? (N/Y): ").strip().upper()
         
         if compile_input == 'Y':
-            compile_exports(exported_files, exports_dir, original_fps, preset)
+            compile_exports(exported_files, exports_dir, original_fps, preset, watermark_size)
         else:
             print("Skipping compilation.")
         
