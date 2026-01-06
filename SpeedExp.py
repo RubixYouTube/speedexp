@@ -75,6 +75,10 @@ except ImportError as e:
 # Fixed pitch ratio: 2^(1/12) = 1 semitone up
 FIXED_PITCH_RATIO = 1.059463094352953
 
+# Special pitch ratios
+SPECIAL_PITCH_UP = 2 ** (7/12)    # +7 semitones = 1.4983070768766815
+SPECIAL_PITCH_DOWN = 2 ** (-5/12)  # -5 semitones = 0.7491535384383408
+
 # Default text size
 DEFAULT_TEXT_SIZE = 111
 
@@ -311,6 +315,15 @@ def format_power_notation(number):
         mantissa = number / (10 ** exponent)
         return f"{mantissa:.2f} * 10^{exponent}"
 
+def get_special_pitch_for_iteration(iteration):
+    """Get the special pitch ratio for a given iteration (0-indexed)"""
+    # Odd iterations (0, 2, 4, ...): +7 semitones
+    # Even iterations (1, 3, 5, ...): -5 semitones
+    if iteration % 2 == 0:
+        return SPECIAL_PITCH_UP, "+7"
+    else:
+        return SPECIAL_PITCH_DOWN, "-5"
+
 def get_movies_directories():
     """Get list of accessible directories in movies folder"""
     possible_paths = [
@@ -489,12 +502,31 @@ def get_user_inputs(use_editor_selection=False):
         if start_num < 0:
             raise ValueError("Starting number must be non-negative")
         
-        pitch_input = input("Set Pitch Increase (N/Y)?: ").strip().upper()
-        if pitch_input not in ['N', 'Y']:
-            print("  Invalid input, defaulting to N")
-            enable_pitch = False
+        # Special pitches input (before normal pitch)
+        special_pitch_input = input("Use special pitches? (N/Y)?: ").strip().upper()
+        if special_pitch_input == 'Y':
+            enable_special_pitch = True
+            enable_pitch = True  # Special pitch implies pitch is enabled
+            print("  ✓ Special pitches enabled: +7st, -5st, +7st, -5st, ...")
+        elif special_pitch_input == 'N':
+            enable_special_pitch = False
+            # Normal pitch input
+            pitch_input = input("Set Pitch Increase (N/Y)?: ").strip().upper()
+            if pitch_input not in ['N', 'Y']:
+                print("  Invalid input, defaulting to N")
+                enable_pitch = False
+            else:
+                enable_pitch = pitch_input == 'Y'
         else:
-            enable_pitch = pitch_input == 'Y'
+            print("  Invalid input, defaulting to N")
+            enable_special_pitch = False
+            # Normal pitch input
+            pitch_input = input("Set Pitch Increase (N/Y)?: ").strip().upper()
+            if pitch_input not in ['N', 'Y']:
+                print("  Invalid input, defaulting to N")
+                enable_pitch = False
+            else:
+                enable_pitch = pitch_input == 'Y'
         
         text_size_input = input("Change text size to num?: ").strip()
         if text_size_input == '' or not text_size_input.isdigit():
@@ -536,7 +568,7 @@ def get_user_inputs(use_editor_selection=False):
             print("  Invalid input, defaulting to fast")
             preset = 'fast'
         
-        return video_path, num_exports, start_num, enable_pitch, text_size, enable_color_mode, preset, watermark_size
+        return video_path, num_exports, start_num, enable_pitch, enable_special_pitch, text_size, enable_color_mode, preset, watermark_size
         
     except Exception as e:
         raise e
@@ -637,8 +669,8 @@ def find_existing_exports(exports_dir):
     return export_files
 
 def process_video_moviepy(input_path, output_path, export_num, iteration, enable_pitch, 
-                          original_fps, has_rubberband, text_size, enable_color_mode, preset,
-                          original_video_duration):
+                          enable_special_pitch, original_fps, has_rubberband, text_size, 
+                          enable_color_mode, preset, original_video_duration):
     """Process video using moviepy"""
     if not MOVIEPY_AVAILABLE:
         raise RuntimeError(f"MoviePy not available: {MOVIEPY_ERROR}")
@@ -660,7 +692,7 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         video = moviepy.editor.VideoFileClip(input_path)
         has_audio = video.audio is not None
         
-        if enable_pitch:
+        if enable_pitch or enable_special_pitch:
             # Pitch mode: Calculate speed factor to match original duration
             input_duration = video.duration
             target_sped_duration = original_video_duration / 2.0
@@ -788,11 +820,12 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
                     pass
 
 def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitch, 
-                          has_rubberband, has_audio, volume_adjustment, original_fps, preset):
+                          enable_special_pitch, pitch_ratio, has_rubberband, has_audio, 
+                          volume_adjustment, original_fps, preset):
     """Build ffmpeg command for speedup with given tempo and video_pts"""
     
-    if enable_pitch and has_rubberband and has_audio:
-        audio_filter = f"rubberband=tempo={tempo}:pitch={FIXED_PITCH_RATIO}:pitchq=speed,volume={volume_adjustment}dB"
+    if (enable_pitch or enable_special_pitch) and has_rubberband and has_audio:
+        audio_filter = f"rubberband=tempo={tempo}:pitch={pitch_ratio}:pitchq=speed,volume={volume_adjustment}dB"
         
         cmd = [
             'ffmpeg', '-i', input_path,
@@ -811,9 +844,9 @@ def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitc
             '-shortest',
             '-y', output_path
         ]
-    elif enable_pitch and not has_rubberband and has_audio:
+    elif (enable_pitch or enable_special_pitch) and not has_rubberband and has_audio:
         # Pitch mode fallback: atempo + asetrate
-        pitched_rate = int(44100 * FIXED_PITCH_RATIO)
+        pitched_rate = int(44100 * pitch_ratio)
         audio_filter = f"atempo={tempo},asetrate={pitched_rate},aresample=44100,volume={volume_adjustment}dB"
         
         cmd = [
@@ -833,7 +866,7 @@ def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitc
             '-shortest',
             '-y', output_path
         ]
-    elif enable_pitch and not has_audio:
+    elif (enable_pitch or enable_special_pitch) and not has_audio:
         # Pitch mode but no audio
         cmd = [
             'ffmpeg', '-i', input_path,
@@ -905,15 +938,16 @@ def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitc
     return cmd
 
 def process_video_cumulative(input_path, output_path, export_num, iteration, reference_size_mb, 
-                             enable_pitch, has_rubberband, has_loudnorm, target_volume_db, 
-                             original_fps, original_video_duration, use_moviepy=False, silent=False, 
-                             text_size=DEFAULT_TEXT_SIZE, enable_color_mode=False, preset='fast'):
+                             enable_pitch, enable_special_pitch, has_rubberband, has_loudnorm, 
+                             target_volume_db, original_fps, original_video_duration, use_moviepy=False, 
+                             silent=False, text_size=DEFAULT_TEXT_SIZE, enable_color_mode=False, preset='fast'):
     """Process video cumulatively - pitch mode uses duration correction, non-pitch uses standard 2x"""
     
     if use_moviepy:
         return process_video_moviepy(input_path, output_path, export_num, iteration, 
-                                     enable_pitch, original_fps, has_rubberband, text_size,
-                                     enable_color_mode, preset, original_video_duration)
+                                     enable_pitch, enable_special_pitch, original_fps, 
+                                     has_rubberband, text_size, enable_color_mode, preset, 
+                                     original_video_duration)
     
     temp_files = []
     
@@ -945,13 +979,27 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         
         temp_files = [temp_sped, temp_list, temp_concat]
         
-        if enable_pitch:
+        # Determine pitch ratio based on mode
+        if enable_special_pitch:
+            pitch_ratio, pitch_semitones = get_special_pitch_for_iteration(iteration)
+            pitch_mode_name = f"SPECIAL PITCH ({pitch_semitones} semitones)"
+        elif enable_pitch:
+            pitch_ratio = FIXED_PITCH_RATIO
+            pitch_semitones = "+1"
+            pitch_mode_name = "PITCH (+1 semitone)"
+        else:
+            pitch_ratio = 1.0
+            pitch_semitones = "0"
+            pitch_mode_name = "NON-PITCH"
+        
+        if enable_pitch or enable_special_pitch:
             # ========== PITCH MODE: Duration correction to match original ==========
             target_sped_duration = original_video_duration / 2.0
             target_final_duration = original_video_duration
             
             if not silent:
-                print(f"  Mode: PITCH (with duration correction)")
+                print(f"  Mode: {pitch_mode_name} (with duration correction)")
+                print(f"  Pitch ratio: {pitch_ratio:.6f} ({pitch_semitones} semitones)")
                 print(f"  Original video duration: {original_video_duration:.6f}s (TARGET)")
                 print(f"  Current input duration: {input_duration:.6f}s")
                 print(f"  Target after speedup: {target_sped_duration:.6f}s")
@@ -964,9 +1012,6 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
             if not silent:
                 print(f"  Calculated tempo: {initial_tempo:.6f}")
                 print(f"  Calculated video_pts: {initial_video_pts:.6f}")
-                cumulative_semitones = (iteration + 1) * 1
-                print(f"  Pitch: rubberband tempo={initial_tempo:.6f}:pitch={FIXED_PITCH_RATIO}")
-                print(f"    Cumulative: +{cumulative_semitones} semitones from original")
                 print(f"  Volume: {current_volume:.1f}dB -> {target_volume_db:.1f}dB (adjust: {volume_adjustment:+.1f}dB)")
             
             tempo = initial_tempo
@@ -986,7 +1031,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                 if attempt == 0:
                     if not silent:
                         if has_rubberband and has_audio:
-                            print(f"    Attempt {attempt+1}: tempo={tempo:.6f}, pitch={FIXED_PITCH_RATIO}")
+                            print(f"    Attempt {attempt+1}: tempo={tempo:.6f}, pitch={pitch_ratio:.6f}")
                         elif has_audio:
                             print(f"    Attempt {attempt+1}: tempo={tempo:.6f} (atempo fallback)")
                         else:
@@ -1002,8 +1047,8 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                         pass
                 
                 cmd_speed = build_speedup_command(
-                    input_path, temp_sped, tempo, video_pts, enable_pitch,
-                    has_rubberband, has_audio, volume_adjustment, original_fps, preset
+                    input_path, temp_sped, tempo, video_pts, enable_pitch, enable_special_pitch,
+                    pitch_ratio, has_rubberband, has_audio, volume_adjustment, original_fps, preset
                 )
                 
                 result = subprocess.run(cmd_speed, capture_output=True, text=True)
@@ -1044,8 +1089,8 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                         if os.path.exists(temp_sped):
                             os.remove(temp_sped)
                         cmd_speed = build_speedup_command(
-                            input_path, temp_sped, tempo, video_pts, enable_pitch,
-                            has_rubberband, has_audio, volume_adjustment, original_fps, preset
+                            input_path, temp_sped, tempo, video_pts, enable_pitch, enable_special_pitch,
+                            pitch_ratio, has_rubberband, has_audio, volume_adjustment, original_fps, preset
                         )
                         subprocess.run(cmd_speed, capture_output=True, text=True)
                     break
@@ -1088,8 +1133,8 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                     pass
             
             cmd_speed = build_speedup_command(
-                input_path, temp_sped, tempo, video_pts, enable_pitch,
-                has_rubberband, has_audio, volume_adjustment, original_fps, preset
+                input_path, temp_sped, tempo, video_pts, enable_pitch, enable_special_pitch,
+                pitch_ratio, has_rubberband, has_audio, volume_adjustment, original_fps, preset
             )
             
             result = subprocess.run(cmd_speed, capture_output=True, text=True)
@@ -1135,7 +1180,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         concat_duration = get_precise_duration(temp_concat)
         
         if not silent:
-            if enable_pitch:
+            if enable_pitch or enable_special_pitch:
                 concat_error = abs(concat_duration - original_video_duration)
                 print(f"    Concatenated: {concat_duration:.6f}s (target: {original_video_duration:.6f}s, error: {concat_error:.6f}s)")
             else:
@@ -1250,11 +1295,12 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         if not silent:
             print(f"✓ Export {export_num} completed")
             print(f"    Final duration: {final_duration:.6f}s")
-            if enable_pitch:
+            if enable_pitch or enable_special_pitch:
                 final_error_to_original = abs(final_duration - original_video_duration)
                 print(f"    Original duration: {original_video_duration:.6f}s")
                 print(f"    Duration error: {final_error_to_original:.6f}s")
                 print(f"    Final tempo used: {tempo:.6f}")
+                print(f"    Pitch: {pitch_ratio:.6f} ({pitch_semitones} semitones)")
             print(f"    Cumulative speed: {cumulative_speed}x")
         
         return True
@@ -1542,7 +1588,7 @@ def main():
         elif editor_input != 'N':
             print("  Invalid input, using manual input...\n")
         
-        video_path, num_exports, start_num, enable_pitch, text_size, enable_color_mode, preset, watermark_size = get_user_inputs(use_editor_selection)
+        video_path, num_exports, start_num, enable_pitch, enable_special_pitch, text_size, enable_color_mode, preset, watermark_size = get_user_inputs(use_editor_selection)
         
         initial_info = get_video_info(video_path)
         initial_size = initial_info['size'] / (1024 * 1024)
@@ -1562,18 +1608,25 @@ def main():
         print(f"  Target Volume: {target_volume_db:.1f}dB")
         print(f"  Exports: {num_exports}")
         print(f"  Starting Number: {start_num}")
-        print(f"  Pitch Increase: {'YES' if enable_pitch else 'NO'}")
+        
+        if enable_special_pitch:
+            print(f"  Pitch Mode: SPECIAL PITCHES")
+            print(f"    Pattern: +7st, -5st, +7st, -5st, ...")
+            print(f"    +7 semitones ratio: {SPECIAL_PITCH_UP:.6f}")
+            print(f"    -5 semitones ratio: {SPECIAL_PITCH_DOWN:.6f}")
+            print(f"    Duration correction: ENABLED")
+        elif enable_pitch:
+            print(f"  Pitch Mode: NORMAL (+1 semitone per export)")
+            print(f"    Pitch ratio: {FIXED_PITCH_RATIO:.6f}")
+            print(f"    Duration correction: ENABLED")
+        else:
+            print(f"  Pitch Mode: NONE")
+            print(f"    Speed: Standard 2x (no duration correction)")
+        
         print(f"  Text Size: {text_size}")
         print(f"  Color Mode: {'YES (hue +25)' if enable_color_mode else 'NO'}")
         print(f"  Preset: {preset}")
         print(f"  Mode: {'MoviePy' if use_moviepy else 'FFmpeg'}")
-        
-        if enable_pitch:
-            print(f"    Filter: rubberband=tempo=X:pitch={FIXED_PITCH_RATIO}")
-            print(f"    Duration correction: ENABLED (perfect match to original)")
-            print(f"    Target duration: {original_video_duration:.6f}s")
-        else:
-            print(f"    Speed: Standard 2x (no duration correction)")
         
         if not use_moviepy:
             print(f"  Rubberband: {'Available' if has_rubberband else 'NOT available (fallback)'}")
@@ -1584,8 +1637,10 @@ def main():
         
         print(f"\nStarting export process...")
         print(f"Flow: Original → Export 1 → Export 2 → ... → Export {num_exports}")
-        if enable_pitch:
-            print(f"Pitch mode: Each export corrected to match original duration: {original_video_duration:.6f}s")
+        if enable_special_pitch:
+            print(f"Special pitch pattern: +7st, -5st, +7st, -5st, ... (corrected to original duration)")
+        elif enable_pitch:
+            print(f"Pitch mode: Each export +1 semitone (corrected to original duration)")
         else:
             print(f"Non-pitch mode: Standard 2x speed per iteration")
         print()
@@ -1613,6 +1668,7 @@ def main():
                         i,
                         reference_size,
                         enable_pitch,
+                        enable_special_pitch,
                         has_rubberband,
                         has_loudnorm,
                         target_volume_db,
@@ -1649,7 +1705,11 @@ def main():
                 base_name = f"export-{export_num}"
                 output_path, actual_name = get_unique_filename(exports_dir, base_name)
                 
-                if enable_pitch:
+                # Determine pitch info for display
+                if enable_special_pitch:
+                    _, pitch_semitones = get_special_pitch_for_iteration(i)
+                    pitch_info = f"Special: {pitch_semitones} semitones"
+                elif enable_pitch:
                     cumulative_semitones = (i + 1) * 1
                     pitch_info = f"+{cumulative_semitones} semitones total"
                 else:
@@ -1662,7 +1722,7 @@ def main():
                 print(f"  Output: {actual_name}.mp4")
                 print(f"  Text: '{export_num} - {power_display}'")
                 print(f"  Pitch: {pitch_info}")
-                if enable_pitch:
+                if enable_pitch or enable_special_pitch:
                     print(f"  Target Duration: {original_video_duration:.6f}s (original)")
                 print(f"  Expected Speed: {2**(i+1)}x from original")
                 if enable_color_mode:
@@ -1676,6 +1736,7 @@ def main():
                     i,
                     reference_size,
                     enable_pitch,
+                    enable_special_pitch,
                     has_rubberband,
                     has_loudnorm,
                     target_volume_db,
@@ -1700,7 +1761,7 @@ def main():
                 export_duration = get_precise_duration(output_path)
                 
                 print(f"  Size: {output_size:.2f} MB ({size_percent:.1f}%)")
-                if enable_pitch:
+                if enable_pitch or enable_special_pitch:
                     duration_error = abs(export_duration - original_video_duration)
                     print(f"  Duration Match: {export_duration:.6f}s (error: {duration_error:.6f}s)")
                 else:
@@ -1712,7 +1773,7 @@ def main():
         print(f"✓ ALL {num_exports} EXPORTS COMPLETED!")
         print(f"{'='*60}")
         print(f"Location: {os.path.abspath(exports_dir)}")
-        if enable_pitch:
+        if enable_pitch or enable_special_pitch:
             print(f"Target Duration: {original_video_duration:.6f}s")
         print(f"\nExport Summary:")
         print(f"{'='*60}")
@@ -1726,7 +1787,11 @@ def main():
             speedup = 2 ** (i + 1)
             size_ratio = (size / initial_size) * 100
             
-            if enable_pitch:
+            if enable_special_pitch:
+                _, pitch_semitones = get_special_pitch_for_iteration(i)
+                pitch_display = f"{pitch_semitones}st (special)"
+                duration_error = abs(export_duration - original_video_duration)
+            elif enable_pitch:
                 cumulative_semitones = (i + 1) * 1
                 pitch_display = f"+{cumulative_semitones}st"
                 duration_error = abs(export_duration - original_video_duration)
@@ -1735,7 +1800,7 @@ def main():
             
             print(f"\n  {os.path.basename(export_file)}:")
             print(f"    Size: {size:.2f} MB ({size_ratio:.1f}%)")
-            if enable_pitch:
+            if enable_pitch or enable_special_pitch:
                 print(f"    Duration: {export_duration:.6f}s (error: {duration_error:.6f}s)")
             else:
                 print(f"    Duration: {export_duration:.2f}s")
