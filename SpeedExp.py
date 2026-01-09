@@ -142,7 +142,6 @@ def get_available_codecs():
             'h264': 'h264' in codecs_output.lower(),
             'mpeg4': 'mpeg4' in codecs_output,
             'libx265': 'libx265' in codecs_output,
-            'ffv1': 'ffv1' in codecs_output.lower(),
         }
         
         print(f"  Available codecs: {[k for k, v in available.items() if v]}")
@@ -150,7 +149,7 @@ def get_available_codecs():
         
     except Exception as e:
         print(f"  Warning: Could not detect codecs: {e}")
-        return {'libx264': True, 'mpeg4': True, 'ffv1': True}
+        return {'libx264': True, 'mpeg4': True}
 
 def select_codec_configs(preset='fast', smooth_mode=False):
     """Select codec configurations to try"""
@@ -159,19 +158,18 @@ def select_codec_configs(preset='fast', smooth_mode=False):
     configs = []
     
     if smooth_mode:
-        # Smooth mode: use lossless ffv1 codec
-        if available.get('ffv1'):
+        # Smooth mode: use libx264 with high quality settings
+        if available.get('libx264'):
             configs.append({
-                'name': 'FFV1 Lossless',
-                'codec': 'ffv1',
-                'params': ['-level', '3', '-pix_fmt', 'yuv420p']
+                'name': 'H.264 High Quality',
+                'codec': 'libx264',
+                'params': ['-crf', '18', '-preset', preset, '-pix_fmt', 'yuv420p']
             })
-        # Fallback to libx264 with lossless settings
-        configs.append({
-            'name': 'H.264 Lossless',
-            'codec': 'libx264',
-            'params': ['-crf', '0', '-preset', preset, '-pix_fmt', 'yuv420p']
-        })
+            configs.append({
+                'name': 'H.264 Lossless',
+                'codec': 'libx264',
+                'params': ['-crf', '0', '-preset', preset, '-pix_fmt', 'yuv420p']
+            })
     else:
         # Normal mode
         if available.get('libx264') or available.get('h264'):
@@ -199,18 +197,14 @@ def select_codec_configs(preset='fast', smooth_mode=False):
                 'codec': 'mpeg4',
                 'params': ['-q:v', '5', '-pix_fmt', 'yuv420p']
             })
-        
-        configs.append({
-            'name': 'Fallback',
-            'codec': 'libx264',
-            'params': ['-pix_fmt', 'yuv420p']
-        })
+    
+    configs.append({
+        'name': 'Fallback',
+        'codec': 'libx264',
+        'params': ['-pix_fmt', 'yuv420p']
+    })
     
     return configs
-
-def get_file_extension(smooth_mode=False):
-    """Get file extension based on mode"""
-    return '.mkv' if smooth_mode else '.mp4'
 
 def validate_video_file(file_path):
     """Validate video file"""
@@ -338,8 +332,6 @@ def format_power_notation(number):
 
 def get_special_pitch_for_iteration(iteration):
     """Get the special pitch ratio for a given iteration (0-indexed)"""
-    # Odd iterations (0, 2, 4, ...): +7 semitones
-    # Even iterations (1, 3, 5, ...): -5 semitones
     if iteration % 2 == 0:
         return SPECIAL_PITCH_UP, "+7"
     else:
@@ -527,11 +519,10 @@ def get_user_inputs(use_editor_selection=False):
         special_pitch_input = input("Use special pitches? (N/Y)?: ").strip().upper()
         if special_pitch_input == 'Y':
             enable_special_pitch = True
-            enable_pitch = True  # Special pitch implies pitch is enabled
+            enable_pitch = True
             print("  ✓ Special pitches enabled: +7st, -5st, +7st, -5st, ...")
         elif special_pitch_input == 'N':
             enable_special_pitch = False
-            # Normal pitch input
             pitch_input = input("Set Pitch Increase (N/Y)?: ").strip().upper()
             if pitch_input not in ['N', 'Y']:
                 print("  Invalid input, defaulting to N")
@@ -541,7 +532,6 @@ def get_user_inputs(use_editor_selection=False):
         else:
             print("  Invalid input, defaulting to N")
             enable_special_pitch = False
-            # Normal pitch input
             pitch_input = input("Set Pitch Increase (N/Y)?: ").strip().upper()
             if pitch_input not in ['N', 'Y']:
                 print("  Invalid input, defaulting to N")
@@ -612,10 +602,9 @@ def create_exports_folder():
     
     return exports_dir
 
-def get_unique_filename(exports_dir, base_name, smooth_mode=False):
+def get_unique_filename(exports_dir, base_name):
     """Get unique filename with oID if exists"""
-    extension = get_file_extension(smooth_mode)
-    output_path = os.path.join(exports_dir, f"{base_name}{extension}")
+    output_path = os.path.join(exports_dir, f"{base_name}.mp4")
     
     if not os.path.exists(output_path):
         return output_path, base_name
@@ -623,7 +612,7 @@ def get_unique_filename(exports_dir, base_name, smooth_mode=False):
     oID = 1
     while True:
         unique_name = f"{base_name}-{oID}"
-        unique_path = os.path.join(exports_dir, f"{unique_name}{extension}")
+        unique_path = os.path.join(exports_dir, f"{unique_name}.mp4")
         if not os.path.exists(unique_path):
             return unique_path, unique_name
         oID += 1
@@ -673,7 +662,7 @@ def verify_output_file(file_path, min_size_kb=0):
 def find_existing_exports(exports_dir):
     """Find all existing export files in the Exports directory"""
     export_files = []
-    pattern = re.compile(r'^export-(\d+)(?:-\d+)?\.(mp4|mkv)$')
+    pattern = re.compile(r'^export-(\d+)(?:-\d+)?\.mp4$')
     
     if not os.path.exists(exports_dir):
         return []
@@ -715,13 +704,11 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         has_audio = video.audio is not None
         
         if enable_pitch or enable_special_pitch:
-            # Pitch mode: Calculate speed factor to match original duration
             input_duration = video.duration
             target_sped_duration = original_video_duration / 2.0
             speed_factor = input_duration / target_sped_duration
             sped_video = video.speedx(speed_factor)
         else:
-            # Non-pitch mode: Standard 2x speed
             if has_audio:
                 video_no_audio = video.without_audio()
                 sped_video_only = video_no_audio.speedx(2)
@@ -788,16 +775,11 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         result_video = moviepy.editor.CompositeVideoClip([final_video, txt_clip])
         
         # Determine codec based on smooth mode
-        if smooth_mode:
-            video_codec = 'ffv1'
-            audio_codec = 'pcm_s16le'
-        else:
-            video_codec = 'libx264'
-            audio_codec = 'aac'
+        video_codec = 'libx264'
+        audio_codec = 'pcm_s16le' if smooth_mode else 'aac'
         
         if enable_color_mode:
-            temp_ext = '.mkv' if smooth_mode else '.mp4'
-            temp_output = os.path.join(temp_dir, f"temp_nocolor_{export_num}_{os.getpid()}{temp_ext}")
+            temp_output = os.path.join(temp_dir, f"temp_nocolor_{export_num}_{os.getpid()}.mp4")
             temp_files.append(temp_output)
             
             result_video.write_videofile(
@@ -805,7 +787,7 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
                 fps=original_fps,
                 codec=video_codec,
                 audio_codec=audio_codec,
-                preset=preset if not smooth_mode else None,
+                preset=preset,
                 verbose=False,
                 logger=None
             )
@@ -814,13 +796,10 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
                 'ffmpeg', '-i', temp_output,
                 '-vf', 'hue=h=25',
                 '-c:v', video_codec,
-            ]
-            if not smooth_mode:
-                cmd_hue.extend(['-preset', preset])
-            cmd_hue.extend([
+                '-preset', preset,
                 '-c:a', 'copy',
                 '-y', output_path
-            ])
+            ]
             subprocess.run(cmd_hue, capture_output=True)
         else:
             result_video.write_videofile(
@@ -828,7 +807,7 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
                 fps=original_fps,
                 codec=video_codec,
                 audio_codec=audio_codec,
-                preset=preset if not smooth_mode else None,
+                preset=preset,
                 verbose=False,
                 logger=None
             )
@@ -859,14 +838,9 @@ def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitc
     """Build ffmpeg command for speedup with given tempo and video_pts"""
     
     # Determine codecs based on smooth mode
-    if smooth_mode:
-        video_codec = 'ffv1'
-        video_params = ['-level', '3', '-pix_fmt', 'yuv420p']
-        audio_codec = 'pcm_s16le'
-    else:
-        video_codec = 'libx264'
-        video_params = ['-preset', preset, '-crf', '23', '-pix_fmt', 'yuv420p']
-        audio_codec = 'aac'
+    video_codec = 'libx264'
+    video_params = ['-preset', preset, '-crf', '18' if smooth_mode else '23', '-pix_fmt', 'yuv420p']
+    audio_codec = 'pcm_s16le' if smooth_mode else 'aac'
     
     if (enable_pitch or enable_special_pitch) and has_rubberband and has_audio:
         audio_filter = f"rubberband=tempo={tempo}:pitch={pitch_ratio}:pitchq=speed,volume={volume_adjustment}dB"
@@ -887,7 +861,6 @@ def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitc
         cmd.extend(['-shortest', '-y', output_path])
         
     elif (enable_pitch or enable_special_pitch) and not has_rubberband and has_audio:
-        # Pitch mode fallback: atempo + asetrate
         pitched_rate = int(44100 * pitch_ratio)
         audio_filter = f"atempo={tempo},asetrate={pitched_rate},aresample=44100,volume={volume_adjustment}dB"
         
@@ -907,7 +880,6 @@ def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitc
         cmd.extend(['-shortest', '-y', output_path])
         
     elif (enable_pitch or enable_special_pitch) and not has_audio:
-        # Pitch mode but no audio
         cmd = [
             'ffmpeg', '-i', input_path,
             '-vf', f'setpts={video_pts}*PTS',
@@ -918,7 +890,6 @@ def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitc
             '-y', output_path
         ]
     elif has_rubberband and has_audio:
-        # Non-pitch mode with rubberband
         audio_filter = f"rubberband=tempo={tempo}:pitchq=speed,volume={volume_adjustment}dB"
         
         cmd = [
@@ -937,7 +908,6 @@ def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitc
         cmd.extend(['-shortest', '-y', output_path])
         
     elif has_audio:
-        # Non-pitch mode with atempo
         audio_filter = f"atempo={tempo},volume={volume_adjustment}dB"
         
         cmd = [
@@ -956,7 +926,6 @@ def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitc
         cmd.extend(['-shortest', '-y', output_path])
         
     else:
-        # No audio
         cmd = [
             'ffmpeg', '-i', input_path,
             '-vf', f'setpts={video_pts}*PTS',
@@ -1000,20 +969,16 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
         has_audio = input_info['has_audio']
         input_fps = input_info.get('fps', original_fps)
         
-        # Volume adjustment
         current_volume = get_audio_volume(input_path) if has_audio else -20.0
         volume_adjustment = target_volume_db - current_volume
         
-        # Temp file paths
         temp_dir = os.path.dirname(output_path)
-        temp_ext = '.mkv' if smooth_mode else '.mp4'
-        temp_sped = os.path.join(temp_dir, f"temp_sped_{export_num}_{os.getpid()}{temp_ext}")
+        temp_sped = os.path.join(temp_dir, f"temp_sped_{export_num}_{os.getpid()}.mp4")
         temp_list = os.path.join(temp_dir, f"temp_list_{export_num}_{os.getpid()}.txt")
-        temp_concat = os.path.join(temp_dir, f"temp_concat_{export_num}_{os.getpid()}{temp_ext}")
+        temp_concat = os.path.join(temp_dir, f"temp_concat_{export_num}_{os.getpid()}.mp4")
         
         temp_files = [temp_sped, temp_list, temp_concat]
         
-        # Determine pitch ratio based on mode
         if enable_special_pitch:
             pitch_ratio, pitch_semitones = get_special_pitch_for_iteration(iteration)
             pitch_mode_name = f"SPECIAL PITCH ({pitch_semitones} semitones)"
@@ -1027,21 +992,19 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
             pitch_mode_name = "NON-PITCH"
         
         if enable_pitch or enable_special_pitch:
-            # ========== PITCH MODE: Duration correction to match original ==========
             target_sped_duration = original_video_duration / 2.0
             target_final_duration = original_video_duration
             
             if not silent:
                 print(f"  Mode: {pitch_mode_name} (with duration correction)")
                 if smooth_mode:
-                    print(f"  Smooth Mode: ENABLED (ffv1 + pcm_s16le)")
+                    print(f"  Smooth Mode: ENABLED (libx264 + pcm_s16le)")
                 print(f"  Pitch ratio: {pitch_ratio:.6f} ({pitch_semitones} semitones)")
                 print(f"  Original video duration: {original_video_duration:.6f}s (TARGET)")
                 print(f"  Current input duration: {input_duration:.6f}s")
                 print(f"  Target after speedup: {target_sped_duration:.6f}s")
                 print(f"  Target after duplicate: {target_final_duration:.6f}s")
             
-            # Calculate required tempo and video_pts
             initial_tempo = input_duration / target_sped_duration
             initial_video_pts = target_sped_duration / input_duration
             
@@ -1149,14 +1112,13 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                 print(f"    Final: {final_sped_duration:.6f}s (error: {final_error:.6f}s, tempo: {tempo:.6f})")
         
         else:
-            # ========== NON-PITCH MODE: Standard 2x speed, no correction ==========
             tempo = 2.0
             video_pts = 0.5
             
             if not silent:
                 print(f"  Mode: NON-PITCH (standard 2x speed)")
                 if smooth_mode:
-                    print(f"  Smooth Mode: ENABLED (ffv1 + pcm_s16le)")
+                    print(f"  Smooth Mode: ENABLED (libx264 + pcm_s16le)")
                 print(f"  Input duration: {input_duration:.6f}s")
                 print(f"  Expected after speedup: {input_duration / 2.0:.6f}s")
                 print(f"  Tempo: {tempo} (fixed)")
@@ -1189,7 +1151,6 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
             if not silent:
                 print(f"    Result: {actual_sped_duration:.6f}s (speed ratio: {speed_ratio:.2f}x)")
         
-        # Step 2: Duplicate
         if not silent:
             print(f"  Step 2/3: Duplicating video...")
         
@@ -1224,7 +1185,6 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
             else:
                 print(f"    Concatenated: {concat_duration:.6f}s")
         
-        # Step 3: Add text overlay
         if not silent:
             print(f"  Step 3/3: Adding text and exporting...")
         
@@ -1237,7 +1197,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
             if not smooth_mode:
                 print(f"    Target: {target_size_mb:.2f} MB, {target_video_bitrate} kbps")
             else:
-                print(f"    Target: Lossless (smooth mode)")
+                print(f"    Target: High quality (smooth mode)")
         
         drawtext_filter = (
             f"drawtext=text='{text_escaped}':"
@@ -1277,7 +1237,6 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
             concat_info = get_video_info(temp_concat)
             
             if smooth_mode:
-                # Smooth mode: lossless codecs
                 if concat_info.get('has_audio', True):
                     cmd_text = [
                         'ffmpeg', '-i', temp_concat,
@@ -1299,7 +1258,6 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
                         '-y', output_path
                     ]
             else:
-                # Normal mode
                 if concat_info.get('has_audio', True):
                     cmd_text = [
                         'ffmpeg', '-i', temp_concat,
@@ -1388,14 +1346,13 @@ def compile_exports(export_files, exports_dir, original_fps, preset='fast', wate
         print("COMPILING ALL EXPORTS...")
         print(f"{'='*60}")
         
-        output_path, output_name = get_unique_filename(exports_dir, "SpeedExp-Compilation", smooth_mode)
+        output_path, output_name = get_unique_filename(exports_dir, "SpeedExp-Compilation")
         
-        ext = get_file_extension(smooth_mode)
-        print(f"  Output: {output_name}{ext}")
+        print(f"  Output: {output_name}.mp4")
         print(f"  Merging {len(export_files)} exports...")
         print(f"  Watermark size: {watermark_size}")
         if smooth_mode:
-            print(f"  Smooth Mode: ENABLED (ffv1 + pcm_s16le)")
+            print(f"  Smooth Mode: ENABLED (libx264 + pcm_s16le)")
         
         temp_list = os.path.join(exports_dir, f"temp_compile_list_{os.getpid()}.txt")
         
@@ -1404,8 +1361,7 @@ def compile_exports(export_files, exports_dir, original_fps, preset='fast', wate
                 abs_path = os.path.abspath(export_file)
                 f.write(f"file '{abs_path}'\n")
         
-        temp_ext = '.mkv' if smooth_mode else '.mp4'
-        temp_concat = os.path.join(exports_dir, f"temp_compile_concat_{os.getpid()}{temp_ext}")
+        temp_concat = os.path.join(exports_dir, f"temp_compile_concat_{os.getpid()}.mp4")
         
         print(f"  Step 1/2: Concatenating exports...")
         
@@ -1512,7 +1468,7 @@ def compile_exports(export_files, exports_dir, original_fps, preset='fast', wate
         final_size = final_info['size'] / (1024 * 1024)
         
         print(f"\n✓ COMPILATION COMPLETE!")
-        print(f"  File: {output_name}{ext}")
+        print(f"  File: {output_name}.mp4")
         print(f"  Size: {final_size:.2f} MB")
         print(f"  Duration: {final_info['duration']:.2f}s")
         
@@ -1538,7 +1494,7 @@ def compile_existing_exports_mode(exports_dir, preset='fast', smooth_mode=False)
     if not existing_exports:
         print("\n❌ No existing export files found in Exports folder.")
         print(f"   Location: {os.path.abspath(exports_dir)}")
-        print("   Expected format: export-N.mp4 or export-N.mkv")
+        print("   Expected format: export-N.mp4 or export-N-ID.mp4")
         return False
     
     print(f"\n✓ Found {len(existing_exports)} export file(s):\n")
@@ -1569,7 +1525,7 @@ def compile_existing_exports_mode(exports_dir, preset='fast', smooth_mode=False)
     
     print(f"\n  Detected FPS: {original_fps:.2f}")
     if smooth_mode:
-        print(f"  Smooth Mode: ENABLED (ffv1 + pcm_s16le)")
+        print(f"  Smooth Mode: ENABLED (libx264 + pcm_s16le)")
     
     watermark_size_input = input("\nResize watermark to?: ").strip()
     if watermark_size_input and watermark_size_input.isdigit():
@@ -1616,7 +1572,7 @@ def main():
         smooth_mode_input = input("\nEnable smooth mode? (N/Y): ").strip().upper()
         if smooth_mode_input == 'Y':
             smooth_mode = True
-            print("  ✓ Smooth mode enabled (ffv1 + pcm_s16le, .mkv output)")
+            print("  ✓ Smooth mode enabled (libx264 + pcm_s16le)")
         elif smooth_mode_input == 'N':
             smooth_mode = False
         else:
@@ -1690,8 +1646,6 @@ def main():
         
         target_volume_db = get_audio_volume(video_path) if initial_info.get('has_audio') else -20.0
         
-        ext = get_file_extension(smooth_mode)
-        
         print(f"\nConfiguration:")
         print(f"  Video: {video_path}")
         print(f"  Codec: {initial_info.get('video_codec', 'unknown')}")
@@ -1706,9 +1660,9 @@ def main():
         
         if smooth_mode:
             print(f"  Smooth Mode: ENABLED")
-            print(f"    Video Codec: ffv1 (lossless)")
+            print(f"    Video Codec: libx264 (high quality)")
             print(f"    Audio Codec: pcm_s16le (uncompressed)")
-            print(f"    Output Format: .mkv")
+            print(f"    Output Format: .mp4")
         else:
             print(f"  Smooth Mode: DISABLED")
             print(f"    Output Format: .mp4")
@@ -1762,7 +1716,7 @@ def main():
                 export_num = start_num + i
                 
                 base_name = f"export-{export_num}"
-                output_path, actual_name = get_unique_filename(exports_dir, base_name, smooth_mode)
+                output_path, actual_name = get_unique_filename(exports_dir, base_name)
                 
                 try:
                     success = process_video_cumulative(
@@ -1808,9 +1762,8 @@ def main():
                 power_display = format_power_notation(current_pow)
                 
                 base_name = f"export-{export_num}"
-                output_path, actual_name = get_unique_filename(exports_dir, base_name, smooth_mode)
+                output_path, actual_name = get_unique_filename(exports_dir, base_name)
                 
-                # Determine pitch info for display
                 if enable_special_pitch:
                     _, pitch_semitones = get_special_pitch_for_iteration(i)
                     pitch_info = f"Special: {pitch_semitones} semitones"
@@ -1824,7 +1777,7 @@ def main():
                 print(f"[Export {i+1}/{num_exports}]")
                 print(f"  Export Number: {export_num}")
                 print(f"  Input: {os.path.basename(current_input)}")
-                print(f"  Output: {actual_name}{ext}")
+                print(f"  Output: {actual_name}.mp4")
                 print(f"  Text: '{export_num} - {power_display}'")
                 print(f"  Pitch: {pitch_info}")
                 if enable_pitch or enable_special_pitch:
@@ -1833,7 +1786,7 @@ def main():
                 if enable_color_mode:
                     print(f"  Color: Hue +25")
                 if smooth_mode:
-                    print(f"  Codec: ffv1 + pcm_s16le (lossless)")
+                    print(f"  Codec: libx264 + pcm_s16le (smooth)")
                 print(f"{'='*60}")
                 
                 success = process_video_cumulative(
@@ -1917,7 +1870,7 @@ def main():
             if enable_color_mode:
                 print(f"    Color: Hue +25")
             if smooth_mode:
-                print(f"    Codec: ffv1 + pcm_s16le")
+                print(f"    Codec: libx264 + pcm_s16le")
         
         print(f"\n{'='*60}")
         
