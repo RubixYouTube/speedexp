@@ -163,18 +163,17 @@ def select_codec_configs(preset='fast', smooth_mode=False):
     configs = []
     
     if smooth_mode:
-        # Smooth mode: use lossless ffv1 codec
-        if available.get('ffv1'):
-            configs.append({
-                'name': 'FFV1 Lossless',
-                'codec': 'ffv1',
-                'params': ['-level', '3', '-pix_fmt', 'yuv420p']
-            })
-        # Fallback to libx264 lossless
+        # Smooth mode: use libx264 lossless codec
         configs.append({
             'name': 'H.264 Lossless',
             'codec': 'libx264',
             'params': ['-crf', '0', '-preset', preset, '-pix_fmt', 'yuv420p']
+        })
+        # Fallback to high quality H.264
+        configs.append({
+            'name': 'H.264 High Quality',
+            'codec': 'libx264',
+            'params': ['-crf', '10', '-preset', preset, '-pix_fmt', 'yuv420p']
         })
     else:
         # Normal mode
@@ -781,12 +780,11 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
         
         result_video = moviepy.editor.CompositeVideoClip([final_video, txt_clip])
         
-        # Determine codec based on smooth mode
+        # Determine codec based on smooth mode - now using libx264 for both
+        video_codec = 'libx264'
         if smooth_mode:
-            video_codec = 'ffv1'
             audio_codec = 'pcm_s16le'
         else:
-            video_codec = 'libx264'
             audio_codec = 'aac'
         
         temp_ext = get_file_extension(smooth_mode)
@@ -800,7 +798,7 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
                 fps=original_fps,
                 codec=video_codec,
                 audio_codec=audio_codec,
-                preset=preset if not smooth_mode else None,
+                preset=preset,
                 verbose=False,
                 logger=None
             )
@@ -809,13 +807,10 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
                 'ffmpeg', '-i', temp_output,
                 '-vf', 'hue=h=25',
                 '-c:v', video_codec,
-            ]
-            if not smooth_mode:
-                cmd_hue.extend(['-preset', preset])
-            cmd_hue.extend([
+                '-preset', preset,
                 '-c:a', 'copy',
                 '-y', output_path
-            ])
+            ]
             subprocess.run(cmd_hue, capture_output=True)
         else:
             result_video.write_videofile(
@@ -823,7 +818,7 @@ def process_video_moviepy(input_path, output_path, export_num, iteration, enable
                 fps=original_fps,
                 codec=video_codec,
                 audio_codec=audio_codec,
-                preset=preset if not smooth_mode else None,
+                preset=preset,
                 verbose=False,
                 logger=None
             )
@@ -853,13 +848,12 @@ def build_speedup_command(input_path, output_path, tempo, video_pts, enable_pitc
                           volume_adjustment, original_fps, preset, smooth_mode=False):
     """Build ffmpeg command for speedup with given tempo and video_pts"""
     
-    # Determine codecs based on smooth mode
+    # Determine codecs based on smooth mode - now using libx264 for both
+    video_codec = 'libx264'
     if smooth_mode:
-        video_codec = 'ffv1'
-        video_params = ['-level', '3', '-pix_fmt', 'yuv420p']
+        video_params = ['-crf', '0', '-preset', preset, '-pix_fmt', 'yuv420p']
         audio_codec = 'pcm_s16le'
     else:
-        video_codec = 'libx264'
         video_params = ['-preset', preset, '-crf', '23', '-pix_fmt', 'yuv420p']
         audio_codec = 'aac'
     
@@ -1020,7 +1014,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
             if not silent:
                 print(f"  Mode: {pitch_mode_name} (with duration correction)")
                 if smooth_mode:
-                    print(f"  Smooth Mode: ENABLED (ffv1 + pcm_s16le)")
+                    print(f"  Smooth Mode: ENABLED (libx264 lossless + pcm_s16le)")
                 print(f"  Pitch ratio: {pitch_ratio:.6f} ({pitch_semitones} semitones)")
                 print(f"  Original video duration: {original_video_duration:.6f}s (TARGET)")
                 print(f"  Current input duration: {input_duration:.6f}s")
@@ -1140,7 +1134,7 @@ def process_video_cumulative(input_path, output_path, export_num, iteration, ref
             if not silent:
                 print(f"  Mode: NON-PITCH (standard 2x speed)")
                 if smooth_mode:
-                    print(f"  Smooth Mode: ENABLED (ffv1 + pcm_s16le)")
+                    print(f"  Smooth Mode: ENABLED (libx264 lossless + pcm_s16le)")
                 print(f"  Input duration: {input_duration:.6f}s")
                 print(f"  Expected after speedup: {input_duration / 2.0:.6f}s")
                 print(f"  Tempo: {tempo} (fixed)")
@@ -1375,7 +1369,7 @@ def compile_exports(export_files, exports_dir, original_fps, preset='fast', wate
         print(f"  Merging {len(export_files)} exports...")
         print(f"  Watermark size: {watermark_size}")
         if smooth_mode:
-            print(f"  Smooth Mode: ENABLED (ffv1 + pcm_s16le)")
+            print(f"  Smooth Mode: ENABLED (libx264 lossless + pcm_s16le)")
         
         temp_list = os.path.join(exports_dir, f"temp_compile_list_{os.getpid()}.txt")
         
@@ -1549,7 +1543,7 @@ def compile_existing_exports_mode(exports_dir, preset='fast', smooth_mode=False)
     
     print(f"\n  Detected FPS: {original_fps:.2f}")
     if smooth_mode:
-        print(f"  Smooth Mode: ENABLED (ffv1 + pcm_s16le)")
+        print(f"  Smooth Mode: ENABLED (libx264 lossless + pcm_s16le)")
     
     watermark_size_input = input("\nResize watermark to?: ").strip()
     if watermark_size_input and watermark_size_input.isdigit():
@@ -1596,7 +1590,7 @@ def main():
         smooth_mode_input = input("\nEnable smooth mode? (N/Y): ").strip().upper()
         if smooth_mode_input == 'Y':
             smooth_mode = True
-            print("  ✓ Smooth mode enabled (ffv1 + pcm_s16le, .mov output)")
+            print("  ✓ Smooth mode enabled (libx264 lossless + pcm_s16le, .mov output)")
         elif smooth_mode_input == 'N':
             smooth_mode = False
         else:
@@ -1686,7 +1680,7 @@ def main():
         
         if smooth_mode:
             print(f"  Smooth Mode: ENABLED")
-            print(f"    Video Codec: ffv1 (lossless)")
+            print(f"    Video Codec: libx264 (lossless, CRF 0)")
             print(f"    Audio Codec: pcm_s16le (uncompressed)")
             print(f"    Output Format: .mov")
         else:
@@ -1812,7 +1806,7 @@ def main():
                 if enable_color_mode:
                     print(f"  Color: Hue +25")
                 if smooth_mode:
-                    print(f"  Codec: ffv1 + pcm_s16le (lossless)")
+                    print(f"  Codec: libx264 lossless + pcm_s16le")
                 print(f"{'='*60}")
                 
                 success = process_video_cumulative(
@@ -1896,7 +1890,7 @@ def main():
             if enable_color_mode:
                 print(f"    Color: Hue +25")
             if smooth_mode:
-                print(f"    Codec: ffv1 + pcm_s16le")
+                print(f"    Codec: libx264 lossless + pcm_s16le")
         
         print(f"\n{'='*60}")
         
